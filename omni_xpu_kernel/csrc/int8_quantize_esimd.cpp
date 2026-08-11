@@ -46,8 +46,10 @@ namespace int8_ops {
 // independent work-item is faster than serializing eight transcendental
 // operations while preserving byte-exact FP16/BF16 output.
 #define OMNI_SILU_MUL_ELEMENTS_PER_WI 1
+#elif defined(OMNI_XPU_ARCH_DG2)
+#define OMNI_SILU_MUL_ELEMENTS_PER_WI 1
 #else
-#error "Define OMNI_XPU_ARCH_PTL_H or OMNI_XPU_ARCH_BMG"
+#error "Define a supported OMNI_XPU_ARCH target"
 #endif
 #endif
 

@@ -17,8 +17,11 @@ namespace {
 #define OMNI_FP8_DEQUANT_ELEMENTS_PER_WI 256
 #elif defined(OMNI_XPU_ARCH_BMG)
 #define OMNI_FP8_DEQUANT_ELEMENTS_PER_WI 256
+#elif defined(OMNI_XPU_ARCH_DG2)
+// Keep every DG2 block message at or below 256 bytes.
+#define OMNI_FP8_DEQUANT_ELEMENTS_PER_WI 64
 #else
-#error "Define OMNI_XPU_ARCH_PTL_H or OMNI_XPU_ARCH_BMG"
+#error "Define a supported OMNI_XPU_ARCH target"
 #endif
 #endif
 

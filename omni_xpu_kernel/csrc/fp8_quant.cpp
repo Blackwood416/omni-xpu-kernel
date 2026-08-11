@@ -24,8 +24,10 @@ namespace {
 #define OMNI_FP8_QUANT_VEC 16
 #elif defined(OMNI_XPU_ARCH_BMG)
 #define OMNI_FP8_QUANT_VEC 8
+#elif defined(OMNI_XPU_ARCH_DG2)
+#define OMNI_FP8_QUANT_VEC 8
 #else
-#error "Define OMNI_XPU_ARCH_PTL_H or OMNI_XPU_ARCH_BMG"
+#error "Define a supported OMNI_XPU_ARCH target"
 #endif
 #endif
 

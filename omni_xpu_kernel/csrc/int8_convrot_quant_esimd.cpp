@@ -20,8 +20,10 @@ namespace {
 #elif defined(OMNI_XPU_ARCH_BMG)
 // The fused path remains disabled on BMG until it is measured there.
 #define OMNI_CONVROT_QUANT_WG_SIZE 8
+#elif defined(OMNI_XPU_ARCH_DG2)
+#define OMNI_CONVROT_QUANT_WG_SIZE 1
 #else
-#error "Define OMNI_XPU_ARCH_PTL_H or OMNI_XPU_ARCH_BMG"
+#error "Define a supported OMNI_XPU_ARCH target"
 #endif
 #endif
 

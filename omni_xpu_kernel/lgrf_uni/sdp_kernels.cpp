@@ -47,6 +47,16 @@ using Cfg = sdp_config::ActiveConfigHD64;
 #include "single_kernels/flash.attn.b.mha.bf16io.opt.h"
 }
 
+#if defined(OMNI_XPU_ARCH_DG2)
+// DG2-native kernel: fp32 accumulation, SLM K/V tiles, BM=32/BN=32 geometry.
+// BMG/PTL-H keep the tuned Xe2 kernels above.
+namespace dg2 {
+#include "single_kernels/flash.attn.b.mha.dg2.h"
+}
+#include "single_kernels/flash.attn.b.mha.dg2.dpas.h"
+#include "single_kernels/flash.attn.b.mha.dg2.dpas3.h"
+#endif
+
 // Helper macro: common entry-point boilerplate
 #define SDP_ENTRY_VARS \
     uint8_t* pQ = reinterpret_cast<uint8_t*>(Q); \
@@ -71,18 +81,46 @@ extern "C" ESIMD_KERNEL_API void sdp_fp16(
     void* sycl_queue_ptr)
 {
     sycl::queue& q = *reinterpret_cast<sycl::queue*>(sycl_queue_ptr);
+#if defined(OMNI_XPU_ARCH_DG2)
+    sycl::nd_range<2> ndr = dg2::flash_ndr(
+        static_cast<int>(q_len), headQ, 128);
+#else
     int groupH = headQ;
     int groupV = (q_len + Cfg::Q_GROUP - 1) / Cfg::Q_GROUP;
     sycl::nd_range<2> ndr(
         {(size_t)(Cfg::WG_SIZE * groupH), (size_t)groupV},
         {(size_t)Cfg::WG_SIZE, 1});
+#endif
     SDP_ENTRY_VARS
+#if defined(OMNI_XPU_ARCH_DG2)
+#if defined(OMNI_XPU_SDP_V2)
+    q.submit([&](sycl::handler& cgh) {
+        cgh.parallel_for(ndr, [=](sycl::nd_item<2> ndi) SYCL_ESIMD_KERNEL {
+            dg2dpas::flashAttnDg2DpasPrecomputed<fp16, 128>(
+                pQ, pK, pV, pA, pO,
+                aLen, kvLen, hQ, hKv, ndi);
+        });
+    }).wait();
+#else
+    dg2v3::runSdpV3<fp16>(
+        pQ, pK, pV, pA, pO,
+        static_cast<int>(aLen), static_cast<int>(kvLen),
+        static_cast<int>(hQ), static_cast<int>(hKv), q);
+#endif
+    return;
+#endif
 
     q.submit([&](sycl::handler& cgh) {
         cgh.parallel_for(ndr, [=](sycl::nd_item<2> ndi) SYCL_ESIMD_KERNEL {
+#if defined(OMNI_XPU_ARCH_DG2)
+            dg2dpas::flashAttnDg2DpasPrecomputed<fp16, 128>(
+                pQ, pK, pV, pA, pO,
+                aLen, kvLen, hQ, hKv, ndi);
+#else
             flashAttnBMha128Fp16OptPrecomputed(
                 pQ, pK, pV, pA, pO,
                 aLen, kvLen, hQ, hKv, ndi);
+#endif
         });
     }).wait();
 }
@@ -99,18 +137,46 @@ extern "C" ESIMD_KERNEL_API void sdp_bf16io(
     void* sycl_queue_ptr)
 {
     sycl::queue& q = *reinterpret_cast<sycl::queue*>(sycl_queue_ptr);
+#if defined(OMNI_XPU_ARCH_DG2)
+    sycl::nd_range<2> ndr = dg2::flash_ndr(
+        static_cast<int>(q_len), headQ, 128);
+#else
     int groupH = headQ;
     int groupV = (q_len + Cfg::Q_GROUP - 1) / Cfg::Q_GROUP;
     sycl::nd_range<2> ndr(
         {(size_t)(Cfg::WG_SIZE * groupH), (size_t)groupV},
         {(size_t)Cfg::WG_SIZE, 1});
+#endif
     SDP_ENTRY_VARS
+#if defined(OMNI_XPU_ARCH_DG2)
+#if defined(OMNI_XPU_SDP_V2)
+    q.submit([&](sycl::handler& cgh) {
+        cgh.parallel_for(ndr, [=](sycl::nd_item<2> ndi) SYCL_ESIMD_KERNEL {
+            dg2dpas::flashAttnDg2DpasPrecomputed<bf16, 128>(
+                pQ, pK, pV, pA, pO,
+                aLen, kvLen, hQ, hKv, ndi);
+        });
+    }).wait();
+#else
+    dg2v3::runSdpV3<bf16>(
+        pQ, pK, pV, pA, pO,
+        static_cast<int>(aLen), static_cast<int>(kvLen),
+        static_cast<int>(hQ), static_cast<int>(hKv), q);
+#endif
+    return;
+#endif
 
     q.submit([&](sycl::handler& cgh) {
         cgh.parallel_for(ndr, [=](sycl::nd_item<2> ndi) SYCL_ESIMD_KERNEL {
+#if defined(OMNI_XPU_ARCH_DG2)
+            dg2dpas::flashAttnDg2DpasPrecomputed<bf16, 128>(
+                pQ, pK, pV, pA, pO,
+                aLen, kvLen, hQ, hKv, ndi);
+#else
             flashAttnBMha128Bf16IoPrecomputed(
                 pQ, pK, pV, pA, pO,
                 aLen, kvLen, hQ, hKv, ndi);
+#endif
         });
     }).wait();
 }
@@ -127,18 +193,36 @@ extern "C" ESIMD_KERNEL_API void sdp_fp16_fast(
     void* sycl_queue_ptr)
 {
     sycl::queue& q = *reinterpret_cast<sycl::queue*>(sycl_queue_ptr);
+#if defined(OMNI_XPU_ARCH_DG2)
+    sycl::nd_range<2> ndr = dg2::flash_ndr(
+        static_cast<int>(q_len), headQ, 128);
+#else
     int groupH = headQ;
     int groupV = (q_len + Cfg::Q_GROUP - 1) / Cfg::Q_GROUP;
     sycl::nd_range<2> ndr(
         {(size_t)(Cfg::WG_SIZE * groupH), (size_t)groupV},
         {(size_t)Cfg::WG_SIZE, 1});
+#endif
     SDP_ENTRY_VARS
+#if defined(OMNI_XPU_ARCH_DG2)
+    dg2v3::runSdpV3<fp16>(
+        pQ, pK, pV, pA, pO,
+        static_cast<int>(aLen), static_cast<int>(kvLen),
+        static_cast<int>(hQ), static_cast<int>(hKv), q);
+    return;
+#endif
 
     q.submit([&](sycl::handler& cgh) {
         cgh.parallel_for(ndr, [=](sycl::nd_item<2> ndi) SYCL_ESIMD_KERNEL {
+#if defined(OMNI_XPU_ARCH_DG2)
+            dg2dpas::flashAttnDg2DpasPrecomputed<fp16, 128>(
+                pQ, pK, pV, pA, pO,
+                aLen, kvLen, hQ, hKv, ndi);
+#else
             param_hd128::flashAttnBMhaFp16OptPrecomputed<false>(
                 pQ, pK, pV, pA, pO,
                 aLen, kvLen, hQ, hKv, ndi);
+#endif
         });
     }).wait();
 }
@@ -156,18 +240,29 @@ extern "C" ESIMD_KERNEL_API void sdp_fp16_hd64(
 {
     using C64 = sdp_config::ActiveConfigHD64;
     sycl::queue& q = *reinterpret_cast<sycl::queue*>(sycl_queue_ptr);
+#if defined(OMNI_XPU_ARCH_DG2)
+    sycl::nd_range<2> ndr = dg2::flash_ndr(
+        static_cast<int>(q_len), headQ, 64);
+#else
     int groupH = headQ;
     int groupV = (q_len + C64::Q_GROUP - 1) / C64::Q_GROUP;
     sycl::nd_range<2> ndr(
         {(size_t)(C64::WG_SIZE * groupH), (size_t)groupV},
         {(size_t)C64::WG_SIZE, 1});
+#endif
     SDP_ENTRY_VARS
 
     q.submit([&](sycl::handler& cgh) {
         cgh.parallel_for(ndr, [=](sycl::nd_item<2> ndi) SYCL_ESIMD_KERNEL {
+#if defined(OMNI_XPU_ARCH_DG2)
+            dg2::flashAttnDg2Precomputed<fp16, 64>(
+                pQ, pK, pV, pA, pO,
+                aLen, kvLen, hQ, hKv, ndi);
+#else
             hd64::flashAttnBMhaFp16OptPrecomputed(
                 pQ, pK, pV, pA, pO,
                 aLen, kvLen, hQ, hKv, ndi);
+#endif
         });
     }).wait();
 }
@@ -185,18 +280,29 @@ extern "C" ESIMD_KERNEL_API void sdp_bf16io_hd64(
 {
     using C64 = sdp_config::ActiveConfigHD64;
     sycl::queue& q = *reinterpret_cast<sycl::queue*>(sycl_queue_ptr);
+#if defined(OMNI_XPU_ARCH_DG2)
+    sycl::nd_range<2> ndr = dg2::flash_ndr(
+        static_cast<int>(q_len), headQ, 64);
+#else
     int groupH = headQ;
     int groupV = (q_len + C64::Q_GROUP - 1) / C64::Q_GROUP;
     sycl::nd_range<2> ndr(
         {(size_t)(C64::WG_SIZE * groupH), (size_t)groupV},
         {(size_t)C64::WG_SIZE, 1});
+#endif
     SDP_ENTRY_VARS
 
     q.submit([&](sycl::handler& cgh) {
         cgh.parallel_for(ndr, [=](sycl::nd_item<2> ndi) SYCL_ESIMD_KERNEL {
+#if defined(OMNI_XPU_ARCH_DG2)
+            dg2::flashAttnDg2Precomputed<bf16, 64>(
+                pQ, pK, pV, pA, pO,
+                aLen, kvLen, hQ, hKv, ndi);
+#else
             hd64_bf16::flashAttnBMhaBf16IoOptPrecomputed(
                 pQ, pK, pV, pA, pO,
                 aLen, kvLen, hQ, hKv, ndi);
+#endif
         });
     }).wait();
 }

@@ -40,7 +40,7 @@ The package and `intel/llm-scaler-omni` image versions share the source in
 derives its native identity from the active Torch installation and
 `OMNI_XPU_DEVICE`.
 
-The packaging layer recognizes Torch XPU minors 2.10, 2.11, and 2.12. Each
+The packaging layer recognizes Torch XPU minors 2.10, 2.11, 2.12, and 2.13. Each
 Torch/GPU pair still requires its own build and runtime validation; recognizing
 a version is not a validation claim. The generated wheel uses a PEP 440 local
 version such as:
@@ -48,6 +48,7 @@ version such as:
 ```text
 omni_xpu_kernel-0.2.0b1+torch211.bmg
 omni_xpu_kernel-0.2.0b1+torch211.ptlh
+omni_xpu_kernel-0.2.0b1+torch213.dg2
 ```
 
 Build and install a different wheel for every Torch/GPU pair. The wheel
@@ -92,6 +93,7 @@ profile, and concrete policy values.
 |---|---|---|
 | Intel Arc B-series / Battlemage | `intel_gpu_bmg_*` | `bmg` |
 | Intel Panther Lake H | `intel_gpu_ptl_h` | `ptl-h` |
+| Intel Arc A770 / DG2-G10 | `intel_gpu_dg2_g10` | `dg2` (aliases: `a770`, `arc-a770`) |
 
 Identify the device before building:
 
@@ -108,11 +110,13 @@ be installed on PTL-H.
 
 - Python 3.9 or newer development environment
 - Intel oneAPI DPC++/C++ Compiler (`icpx`)
-- A packaging-supported PyTorch XPU minor: 2.10.x, 2.11.x, or 2.12.x
+- A packaging-supported PyTorch XPU minor: 2.10.x, 2.11.x, 2.12.x, or 2.13.x
 - `onednn==2025.3.0` and `onednn-devel==2025.3.0` for the package's direct
   oneDNN calls on Linux
 - A matched oneAPI oneDNN 3.9.1 development installation on Windows; the
   build vendors its `dnnl.dll` and redistribution notices into the wheel
+- The Windows Torch 2.13 DG2 profile instead uses the matched oneAPI 2026
+  oneDNN 3.11.2 runtime, avoiding a sycl8/sycl9 ABI mix
 - Intel [`sycl-tla`](https://github.com/intel/sycl-tla) headers for the
   default Linux CUTE build
 
@@ -173,6 +177,17 @@ must not be mistaken for the default image artifact.
 
 For Windows build and installation details, see
 [`WHL_BUILD_INSTALL.md`](WHL_BUILD_INSTALL.md).
+
+The A770 profile is intentionally core-only: LGRF and CUTE attention sidecars
+are omitted and callers retain PyTorch SDPA. Windows compiles translation units
+in parallel (eight jobs by default):
+
+```powershell
+$env:OMNI_XPU_DEVICE = "a770"
+$env:OMNI_XPU_REQUIRE_CUTE = "0"
+$env:OMNI_XPU_BUILD_JOBS = "8"  # or use MAX_JOBS
+python -m pip wheel . --no-build-isolation --no-deps --wheel-dir dist
+```
 
 ### oneDNN consistency
 
@@ -462,6 +477,9 @@ The Linux build produces three extension components:
 metadata, core AOT ISA, and sidecars identify the same target. BMG core and
 CUTE components query the exact runtime Device ID and share the B60/B70 policy
 table.
+
+DG2/A770 builds contain only `_C`; their Python capability checks report the
+attention sidecars unavailable so integration layers select PyTorch SDPA.
 
 ## License
 

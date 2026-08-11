@@ -67,8 +67,10 @@ constexpr int HALF_GROUP = SVDQ_GROUP_SIZE / 2;  // 32 packed bytes per group
 #define OMNI_SVDQ_DEQUANT_GROUPS_PER_WI 60
 #elif defined(OMNI_XPU_ARCH_BMG)
 #define OMNI_SVDQ_DEQUANT_GROUPS_PER_WI 60
+#elif defined(OMNI_XPU_ARCH_DG2)
+#define OMNI_SVDQ_DEQUANT_GROUPS_PER_WI 8
 #else
-#error "Define OMNI_XPU_ARCH_PTL_H or OMNI_XPU_ARCH_BMG"
+#error "Define a supported OMNI_XPU_ARCH target"
 #endif
 #endif
 
@@ -270,8 +272,10 @@ void dequantize_svdq_w4_signed_vector_kernel(
 #define OMNI_SVDQ_UNPACK_COLS_PER_WI 3840
 #elif defined(OMNI_XPU_ARCH_BMG)
 #define OMNI_SVDQ_UNPACK_COLS_PER_WI 3840
+#elif defined(OMNI_XPU_ARCH_DG2)
+#define OMNI_SVDQ_UNPACK_COLS_PER_WI 1024
 #else
-#error "Define OMNI_XPU_ARCH_PTL_H or OMNI_XPU_ARCH_BMG"
+#error "Define a supported OMNI_XPU_ARCH target"
 #endif
 #endif
 
@@ -280,8 +284,10 @@ void dequantize_svdq_w4_signed_vector_kernel(
 #define OMNI_SVDQ_UNPACK_BYTES_PER_ITERATION 64
 #elif defined(OMNI_XPU_ARCH_BMG)
 #define OMNI_SVDQ_UNPACK_BYTES_PER_ITERATION 128
+#elif defined(OMNI_XPU_ARCH_DG2)
+#define OMNI_SVDQ_UNPACK_BYTES_PER_ITERATION 64
 #else
-#error "Define OMNI_XPU_ARCH_PTL_H or OMNI_XPU_ARCH_BMG"
+#error "Define a supported OMNI_XPU_ARCH target"
 #endif
 #endif
 
@@ -290,8 +296,10 @@ void dequantize_svdq_w4_signed_vector_kernel(
 #define OMNI_SVDQ_UNPACK_WG_SIZE 32
 #elif defined(OMNI_XPU_ARCH_BMG)
 #define OMNI_SVDQ_UNPACK_WG_SIZE 1
+#elif defined(OMNI_XPU_ARCH_DG2)
+#define OMNI_SVDQ_UNPACK_WG_SIZE 8
 #else
-#error "Define OMNI_XPU_ARCH_PTL_H or OMNI_XPU_ARCH_BMG"
+#error "Define a supported OMNI_XPU_ARCH target"
 #endif
 #endif
 
@@ -404,8 +412,10 @@ void unpack_svdq_int4_kernel(
 #define OMNI_SVDQ_QUANT_GROUPS_PER_WI 60
 #elif defined(OMNI_XPU_ARCH_BMG)
 #define OMNI_SVDQ_QUANT_GROUPS_PER_WI 60
+#elif defined(OMNI_XPU_ARCH_DG2)
+#define OMNI_SVDQ_QUANT_GROUPS_PER_WI 8
 #else
-#error "Define OMNI_XPU_ARCH_PTL_H or OMNI_XPU_ARCH_BMG"
+#error "Define a supported OMNI_XPU_ARCH target"
 #endif
 #endif
 

@@ -13,6 +13,7 @@ namespace sdp_config {
 
 struct BMGTag {};
 struct PTLHTag {};
+struct DG2Tag {};
 
 template <typename ArchTag, int HeadDim>
 struct SdpConfig {
@@ -41,9 +42,15 @@ using ConfigBMG = SdpConfig<BMGTag, 128>;
 // performance- and spill-validated with representative ComfyUI workloads.
 using ConfigPTLH = SdpConfig<PTLHTag, 128>;
 
+// Intel Arc A770 / DG2 (Xe-HPG). The fixed implementation mapping compiles
+// for the same dpas<8,8> / lsc_2d / doubleGRF intrinsics and is validated on
+// A770 with its own correctness and performance campaign before dispatch.
+using ConfigDG2 = SdpConfig<DG2Tag, 128>;
+
 // HEAD_DIM=64 variants — for SD3.5, z-Image, LTX-Video
 using ConfigBMG_HD64 = SdpConfig<BMGTag, 64>;
 using ConfigPTLH_HD64 = SdpConfig<PTLHTag, 64>;
+using ConfigDG2_HD64 = SdpConfig<DG2Tag, 64>;
 
 // ============================================================================
 // Active configuration — setup.py defines exactly one architecture macro from
@@ -57,8 +64,11 @@ using ActiveConfigHD64 = ConfigBMG_HD64;
 #elif defined(OMNI_XPU_ARCH_PTL_H)
 using ActiveConfig = ConfigPTLH;
 using ActiveConfigHD64 = ConfigPTLH_HD64;
+#elif defined(OMNI_XPU_ARCH_DG2)
+using ActiveConfig = ConfigDG2;
+using ActiveConfigHD64 = ConfigDG2_HD64;
 #else
-#error "Define OMNI_XPU_ARCH_BMG or OMNI_XPU_ARCH_PTL_H"
+#error "Define OMNI_XPU_ARCH_BMG, OMNI_XPU_ARCH_PTL_H, or OMNI_XPU_ARCH_DG2"
 #endif
 
 }  // namespace sdp_config

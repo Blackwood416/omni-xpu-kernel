@@ -16,13 +16,73 @@ Windows wheel tag: cp313-cp313-win_amd64
 llm-scaler source: b9b0c4c900f1a1ef3ec987fe6be5aef26b22e3c8
 ```
 
+A770 兼容 profile 另行验证了以下组合：
+
+```text
+Python 3.13 / PyTorch 2.13.0+xpu
+Intel oneAPI DPC++/C++ Compiler 2026.1.0
+oneDNN 3.11.2 native API/runtime（由 Windows wheel 内置）
+Intel Arc A770 / DG2-G10，驱动 32.0.101.8860
+OMNI_XPU_DEVICE=a770（规范化为 dg2）
+Windows wheel: omni_xpu_kernel-0.2.0b1+torch213.dg2-cp313-cp313-win_amd64.whl
+upstream base: ce0ccb928b1aa59f019a8c27b54fbb82d01c332c
+```
+
+### A770/DG2 SDP 现状
+
+DG2 wheel 从 `omni_xpu_kernel` 0.2.0b1 起打包 `lgrf_sdp` sidecar，使用
+DG2 原生 ESIMD kernel（`flash.attn.b.mha.dg2.h`），A770 上需显式设置
+`OMNI_ATTN_BACKEND=esimd` 启用；默认仍走 PyTorch SDPA。
+
+#### 已保留的负面结果与根因
+
+- Xe2 原版 lgrf kernel 的 `dpas.hf.hf.8.8`（fp16 S×V 累加器）被 DG2 VISA
+  校验器拒绝；改为 fp32 累加器后仍会
+  `UR_RESULT_ERROR_DEVICE_LOST`。
+- 根因（通过独立 SYCL harness + Windows LiveKernelEvent 141 日志确认）：
+  **ESIMD work-group 大小 512 会在 A770（驱动 32.0.101.8860）触发 GPU
+  TDR**，即使 kernel 只做 `slm_init` + 一次 store。Xe2 kernel 家族虽然
+  WG=16，但同时使用 2D LSC、约 17 KB spill 与 fp16 DPAS 累加，同样不稳。
+- 结论：A770 上 ESIMD attention 必须使用小 work-group（当前实现 WG=32，
+  每线程一个 query row，全 head-dim 走寄存器），并避免 2D LSC 与
+  named barrier。
+
+#### 当前验收范围
+
+- 正确性：`B=1, H=1..8, D∈{64,128}, fp16/bf16`，含 q/kv 非 32 倍数与
+  1 token 边界，全部通过（fp16 max_abs ≤ 2.4e-4，bf16 ≤ 2e-3，对照
+  Torch SDPA）。
+- 稳定性：连续调用确定性一致；回归门禁
+  `tests/repro_a770_sdp_device_lost.py` 通过（有限输出 + 误差阈值）。
+- 性能（A770, driver 32.0.101.8860, oneAPI 2026.1, wall median,
+  D=128, fp16, H=32）：v4 DPAS 变体（`flash.attn.b.mha.dg2.dpas3.h`，
+  RPT=4 + doubleGRF，qLen≤1024 fused 单 kernel / qLen>1024 两 kernel，
+  异步 dispatch）在全部基准形状反超 Torch SDPA：L=512 0.57 vs 0.66 ms，
+  L=1024 1.34 vs 1.36 ms，L=2048 2.9 vs 3.78 ms，L=4096 9.8 vs 13.5 ms，
+  L=8192 40 vs 42.2 ms。历史基线：v3 BN=128 79 ms、v3 BN=64 105 ms、
+  v2 110 ms。优化由 VTune 驱动：exp2 向量化（硬件 native_exp2，SP 指令
+  130G→41G）、QK/S*V 的 A 操作数 chunk-major 预排、K/V 分 SLM 区同时
+  staging（barrier 3→2/tile）、分数直接存 per-row 向量、DPAS A 未用行
+  不清零（attn 总指令 404G→194G/12 次）；小形状开销通过 fused pack、
+  去掉每调用 queue.wait（异步，调用方 stream 同步）、缓存 python
+  sidecar glob（原 ~0.5 ms/次）消除。v3 已修复早期两处正确性缺陷：
+  SLM 每线程状态竞争（QSTAGE/ACC/SC/PALL 被 32 个 lane 共享导致互相
+  覆盖）和 pack kernel kvZero 偏移双重加 tile（tile≥1 全部被误 mask）。
+  D64 仍走 v1 FMA。
+- 已记录的负面结果（同一驱动/编译器栈）：RPT=6/8（DPAS 行 100% 利用）
+  只要有编译器 spill（7.5-16 KB）就触发 `UR_RESULT_ERROR_DEVICE_LOST`；
+  N=8 下 fp16 DPAS 累加被 dpas.hpp 拒绝（fp16 C 仅 N=16，而 N=16 在 A770
+  上数值错误）；packedV 不经 SLM 直接读全局比 SLM staging 慢约 60%。
+  当前与 Torch SDPA 的剩余差距主要来自 DPAS 50% 零行浪费与 ESIMD
+  A/B SLM relay 指令量。
+
 本文不把 ComfyUI Portable 当作编译环境。编译环境位于项目目录内，
 Portable 只用于最终安装和运行测试，避免修改其他项目的 Python 环境。
 
 > [!IMPORTANT]
 > Torch、Python ABI 和 GPU AOT 目标都属于 wheel 身份的一部分。不同
 > Python ABI、Torch minor 或 GPU 架构必须分别构建，不能通过重命名 wheel
-> 互换。Torch 2.13 尚未包含在本文的已验证范围内。
+> 互换。Torch 2.13 仅在上述 Windows DG2/A770 组合中完成验证。
 
 ## 1. 已验证版本矩阵
 
@@ -65,6 +125,8 @@ NuGet fallback。
 `dnnl.dll`。构建仍然需要同一个 oneAPI oneDNN development install 中的
 `oneapi/dnnl/dnnl.hpp`、`dnnl.lib` 和 `dnnl.dll`。`setup.py` 会校验三者对应
 oneDNN `3.9.1`，并把 DLL 和 redistribution notices 打进 Windows wheel。
+Windows Torch 2.13 DG2 profile 使用同一 SYCL 2026 ABI 的 oneDNN `3.11.2`；
+不要给该组合混入依赖 `sycl8.dll` 的 2025.3 oneDNN runtime。
 
 Torch XPU 在本次解析出的关键原生传递依赖如下。通常不应逐项手工安装，
 而应让 `torch==2.12.0+xpu` 解析它们：
@@ -328,7 +390,7 @@ size:   25,185,658 bytes
 SHA256: E112C1720ACA4AF975501470A77F654656D6A4A3CF919A36A2EFBC8B1F4F0795
 ```
 
-体积增加来自 wheel 内置的 oneDNN `3.9.1` Windows runtime。构建只复制与
+体积增加来自 wheel 内置的匹配 oneDNN Windows runtime。构建只复制与
 已校验 `dnnl.lib` 同一个安装根下的 `bin\dnnl.dll`，不会把 Torch、SYCL、
 Unified Runtime 或完整 oneAPI SDK 重复打进 wheel。
 

@@ -16,8 +16,8 @@ VERSION_FILE = PROJECT_ROOT / "omni_xpu_kernel" / "_version.py"
 PYPROJECT_FILE = PROJECT_ROOT / "pyproject.toml"
 IMAGE_VERSION = "0.2.0-b1"
 BASE_VERSION = "0.2.0b1"
-SUPPORTED_TORCH_MINORS = ("2.10", "2.11", "2.12")
-SUPPORTED_XPU_TARGETS = ("bmg", "ptl-h")
+SUPPORTED_TORCH_MINORS = ("2.10", "2.11", "2.12", "2.13")
+SUPPORTED_XPU_TARGETS = ("bmg", "ptl-h", "dg2")
 VERSION_NAMESPACE = run_path(str(VERSION_FILE))
 TORCH_VERSION = VERSION_NAMESPACE["get_installed_torch_version"]()
 TORCH_VERSION_TAG = VERSION_NAMESPACE["get_torch_tag"](TORCH_VERSION)
@@ -85,6 +85,7 @@ def test_kernel_version_is_exposed_by_package_metadata():
         ("2.11.0+xpu", "2.11.0", "2.11", "torch211"),
         ("2.12.0+xpu", "2.12.0", "2.12", "torch212"),
         ("2.12.1+xpu", "2.12.1", "2.12", "torch212"),
+        ("2.13.0+xpu", "2.13.0", "2.13", "torch213"),
     ],
 )
 def test_supported_torch_minors_select_distinct_wheel_tags(
@@ -100,7 +101,7 @@ def test_supported_torch_minors_select_distinct_wheel_tags(
 
 @pytest.mark.parametrize(
     ("target", "target_tag"),
-    [("bmg", "bmg"), ("ptl-h", "ptlh")],
+    [("bmg", "bmg"), ("ptl-h", "ptlh"), ("dg2", "dg2")],
 )
 def test_gpu_targets_select_distinct_wheel_tags(target, target_tag):
     package_version = VERSION_NAMESPACE["get_package_version"]("2.11.0+xpu", target)
@@ -109,6 +110,11 @@ def test_gpu_targets_select_distinct_wheel_tags(target, target_tag):
     assert VERSION_NAMESPACE["get_xpu_target_from_package_version"](
         package_version
     ) == target
+
+
+@pytest.mark.parametrize("alias", ["a770", "arc-a770", "arc_a770", "dg2-g10"])
+def test_a770_aliases_select_dg2(alias):
+    assert VERSION_NAMESPACE["normalize_xpu_target"](alias) == "dg2"
 
 
 @pytest.mark.parametrize("target", ["ptl", "ptl-u", "pvc", "invalid"])
@@ -158,7 +164,7 @@ def test_inconsistent_installed_wheel_metadata_is_rejected(monkeypatch, tmp_path
         get_build_info(packaged_version_file)
 
 
-@pytest.mark.parametrize("torch_version", ["2.9.1+xpu", "2.13.0+xpu", "invalid"])
+@pytest.mark.parametrize("torch_version", ["2.9.1+xpu", "2.14.0+xpu", "invalid"])
 def test_unsupported_torch_versions_are_rejected(torch_version):
     with pytest.raises(RuntimeError, match="Torch minor|Unsupported Torch version"):
         VERSION_NAMESPACE["get_torch_minor"](torch_version)
@@ -210,6 +216,51 @@ def test_setup_metadata_tags_ptl_h_target():
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip() == f"{BASE_VERSION}+{TORCH_VERSION_TAG}.ptlh"
+
+
+def test_dg2_setup_profile_builds_core_and_sdp_sidecar(monkeypatch):
+    import setuptools
+
+    captured = {}
+    monkeypatch.setenv("OMNI_XPU_DEVICE", "a770")
+    monkeypatch.delenv("OMNI_XPU_REQUIRE_CUTE", raising=False)
+    monkeypatch.delenv("CUTLASS_SYCL_ROOT", raising=False)
+    monkeypatch.setattr(setuptools, "setup", lambda **kwargs: captured.update(kwargs))
+
+    namespace = run_path(
+        str(PROJECT_ROOT / "setup.py"), run_name="__dg2_setup_metadata_test__"
+    )
+
+    assert namespace["BUILD_XPU_TARGET"] == "dg2"
+    assert namespace["XPU_ARCH_MACRO"] == "OMNI_XPU_ARCH_DG2"
+    assert [extension.name for extension in captured["ext_modules"]] == [
+        "omni_xpu_kernel._C",
+        "omni_xpu_kernel.lgrf_uni.lgrf_sdp",
+    ]
+    assert "omni_xpu_kernel.cute.cute_fmha_torch" not in [
+        extension.name for extension in captured["ext_modules"]
+    ]
+    assert "omni_xpu_kernel.cute.cute_fmha_torch" not in [
+        extension.name for extension in captured["ext_modules"]
+    ]
+    assert namespace["get_core_aot_compile_args"]("dg2") == [
+        "-fsycl-targets=spir64_gen",
+        "-Xsycl-target-backend",
+        "-device dg2",
+        "-DOMNI_XPU_CORE_AOT=1",
+    ]
+
+
+def test_windows_parallel_job_count_is_bounded(monkeypatch):
+    import setuptools
+
+    monkeypatch.setattr(setuptools, "setup", lambda **kwargs: None)
+    monkeypatch.setenv("OMNI_XPU_REQUIRE_CUTE", "0")
+    namespace = run_path(
+        str(PROJECT_ROOT / "setup.py"), run_name="__parallel_jobs_test__"
+    )
+    monkeypatch.setenv("OMNI_XPU_BUILD_JOBS", "32")
+    assert namespace["build_job_count"](7) == 7
 
 
 def test_build_system_does_not_force_a_torch_environment():
@@ -267,9 +318,11 @@ def test_extension_metadata_tracks_native_sources(monkeypatch, tmp_path):
     assert "kitchen_rms_rope_sycl.cpp" in main_sources
     assert "svdq_dequant.cpp" in main_sources
     assert setup_namespace["BUILD_XPU_TARGET"] == XPU_TARGET
-    assert setup_namespace["XPU_ARCH_MACRO"] == (
-        "OMNI_XPU_ARCH_PTL_H" if XPU_TARGET == "ptl-h" else "OMNI_XPU_ARCH_BMG"
-    )
+    assert setup_namespace["XPU_ARCH_MACRO"] == {
+        "bmg": "OMNI_XPU_ARCH_BMG",
+        "ptl-h": "OMNI_XPU_ARCH_PTL_H",
+        "dg2": "OMNI_XPU_ARCH_DG2",
+    }[XPU_TARGET]
     assert all(
         not package.startswith(("tests", "scripts", "benchmarks"))
         for package in captured["packages"]

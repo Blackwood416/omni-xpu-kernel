@@ -296,6 +296,10 @@ torch::Tensor sdp(torch::Tensor q, torch::Tensor k, torch::Tensor v) {
     int call_num = sdp_call_counter.fetch_add(1);
     bool needs_recheck = (call_num % RECHECK_INTERVAL == 0);
 
+    // DG2 fp32-accumulator kernels have enough headroom for any fp16 V value,
+    // so skip the V-scaling recheck entirely on that target. BMG/PTL-H keep
+    // the fp16-accumulator compensation path.
+#if !defined(OMNI_XPU_ARCH_DG2)
     if (needs_recheck) {
         float v_global_max = v.abs().max().item<float>();
         bool needs = (v_global_max >= V_SCALE_THRESHOLD);
@@ -319,6 +323,7 @@ torch::Tensor sdp(torch::Tensor q, torch::Tensor k, torch::Tensor v) {
                        v_scale.max().item<float>());
         }
     }
+#endif
 
     bool needs_scaling = cached_needs_scaling.load();
 

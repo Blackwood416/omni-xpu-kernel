@@ -14,8 +14,16 @@ from pathlib import Path
 # they were compiled against.
 __image_version__ = "0.2.0-b1"
 __base_version__ = "0.2.0b1"
-__supported_torch_minors__ = ("2.10", "2.11", "2.12")
-__supported_xpu_targets__ = ("bmg", "ptl-h")
+__supported_torch_minors__ = ("2.10", "2.11", "2.12", "2.13")
+__supported_xpu_targets__ = ("bmg", "ptl-h", "dg2")
+
+_XPU_TARGET_ALIASES = {
+    "a770": "dg2",
+    "arc-a770": "dg2",
+    "arc_a770": "dg2",
+    "dg2-g10": "dg2",
+    "dg2-g10-a0": "dg2",
+}
 
 
 def get_public_torch_version(torch_version):
@@ -47,6 +55,7 @@ def get_torch_tag(torch_version):
 def normalize_xpu_target(xpu_target):
     """Return the canonical build target used by the Intel GPU compiler."""
     target = str(xpu_target).strip().lower()
+    target = _XPU_TARGET_ALIASES.get(target, target)
     if target not in __supported_xpu_targets__:
         supported = ", ".join(__supported_xpu_targets__)
         raise RuntimeError(
@@ -67,7 +76,9 @@ def get_xpu_target_tag(xpu_target):
 
 def get_xpu_target_from_package_version(package_version):
     """Recover the AOT target from a Torch- and GPU-tagged wheel version."""
-    match = re.search(r"\+torch\d+\.(bmg|ptlh)$", str(package_version), re.IGNORECASE)
+    match = re.search(
+        r"\+torch\d+\.(bmg|ptlh|dg2)$", str(package_version), re.IGNORECASE
+    )
     if not match:
         raise RuntimeError(
             "omni_xpu_kernel wheel version has no supported GPU target tag: "

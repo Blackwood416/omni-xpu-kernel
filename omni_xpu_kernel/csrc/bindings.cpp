@@ -211,6 +211,8 @@ PYBIND11_MODULE(_C, m) {
     m.attr("__core_aot_target__") = "ptl-h";
 #elif defined(OMNI_XPU_CORE_AOT) && defined(OMNI_XPU_ARCH_BMG)
     m.attr("__core_aot_target__") = "bmg";
+#elif defined(OMNI_XPU_CORE_AOT) && defined(OMNI_XPU_ARCH_DG2)
+    m.attr("__core_aot_target__") = "dg2";
 #else
     m.attr("__core_aot_target__") = "";
 #endif

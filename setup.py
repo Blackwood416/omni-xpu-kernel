@@ -24,13 +24,13 @@ import subprocess
 import shutil
 import platform
 import sysconfig
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from runpy import run_path
 from pathlib import Path
 from setuptools import setup, Extension, find_packages
 from setuptools.command.build_ext import build_ext
 
 IS_WINDOWS = platform.system() == "Windows"
-VALIDATED_ONEDNN_VERSION = (3, 9, 1)
 
 
 VERSION_NAMESPACE = run_path(str(Path(__file__).parent / "omni_xpu_kernel" / "_version.py"))
@@ -42,8 +42,18 @@ PACKAGE_VERSION = VERSION_NAMESPACE["get_package_version"](
 XPU_ARCH_MACROS = {
     "bmg": "OMNI_XPU_ARCH_BMG",
     "ptl-h": "OMNI_XPU_ARCH_PTL_H",
+    "dg2": "OMNI_XPU_ARCH_DG2",
 }
 XPU_ARCH_MACRO = XPU_ARCH_MACROS[BUILD_XPU_TARGET]
+
+# Torch 2.13 XPU uses the oneAPI 2026 SYCL ABI. Keep upstream's validated
+# oneDNN 3.9.1 contract everywhere else, while selecting the matched 2026
+# oneDNN development runtime for the Windows DG2 compatibility build.
+VALIDATED_ONEDNN_VERSION = (
+    (3, 11, 2)
+    if IS_WINDOWS and BUILD_XPU_TARGET == "dg2" and BUILD_TORCH_VERSION.startswith("2.13.")
+    else (3, 9, 1)
+)
 
 BMG_CUTE_REMAINDER_MASK_ORIGINAL = """\
           FragSRow k_rem_mask;
@@ -88,6 +98,96 @@ def get_core_aot_compile_args(xpu_target):
         f"-device {xpu_target}",
         "-DOMNI_XPU_CORE_AOT=1",
     ]
+
+
+def build_job_count(source_count):
+    """Return a bounded Windows compile fan-out."""
+    requested = os.environ.get("OMNI_XPU_BUILD_JOBS", os.environ.get("MAX_JOBS", ""))
+    if requested:
+        try:
+            jobs = int(requested)
+        except ValueError as error:
+            raise RuntimeError(
+                "OMNI_XPU_BUILD_JOBS/MAX_JOBS must be a positive integer"
+            ) from error
+        if jobs < 1:
+            raise RuntimeError("OMNI_XPU_BUILD_JOBS/MAX_JOBS must be at least 1")
+    else:
+        jobs = min(os.cpu_count() or 1, 8)
+    return min(jobs, max(source_count, 1))
+
+
+def run_compiler(command, compiler_env):
+    return subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=compiler_env,
+    )
+
+
+def add_aot_tools_to_path(compiler_env, icpx):
+    """Expose ocloc and llvm-foreach in component-layout oneAPI installs."""
+    if not IS_WINDOWS:
+        return compiler_env
+    oneapi_root = Path(
+        os.environ.get(
+            "ONEAPI_ROOT",
+            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+            / "Intel"
+            / "oneAPI",
+        )
+    )
+    candidates = [
+        oneapi_root / "ocloc" / "latest" / "bin",
+        oneapi_root / "latest" / "bin",
+        Path(icpx).resolve().parent / "compiler",
+    ]
+    directories = [str(path) for path in candidates if path.is_dir()]
+    if directories:
+        compiler_env = compiler_env.copy()
+        compiler_env["PATH"] = os.pathsep.join(
+            [*directories, compiler_env.get("PATH", "")]
+        )
+    return compiler_env
+
+
+def python_development_paths():
+    """Locate files omitted by Windows embedded Python distributions."""
+    include_candidates = []
+    lib_candidates = []
+    if os.environ.get("OMNI_XPU_PYTHON_INCLUDE"):
+        include_candidates.append(Path(os.environ["OMNI_XPU_PYTHON_INCLUDE"]))
+    if os.environ.get("OMNI_XPU_PYTHON_LIB"):
+        lib_candidates.append(Path(os.environ["OMNI_XPU_PYTHON_LIB"]))
+    include_candidates.append(Path(sysconfig.get_path("include")))
+    configured_lib = sysconfig.get_config_var("LIBDIR")
+    if configured_lib:
+        lib_candidates.append(Path(configured_lib))
+    if IS_WINDOWS:
+        version_dir = f"Python{sys.version_info.major}{sys.version_info.minor}"
+        roots = [
+            Path(os.environ.get("LocalAppData", "")) / "Programs" / "Python" / version_dir,
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / version_dir,
+        ]
+        for root in roots:
+            include_candidates.append(root / "Include")
+            lib_candidates.append(root / "libs")
+    python_include = next(
+        (path for path in include_candidates if (path / "Python.h").is_file()), None
+    )
+    python_lib_name = f"python{sys.version_info.major}{sys.version_info.minor}.lib"
+    python_lib_dir = next(
+        (path for path in lib_candidates if (path / python_lib_name).is_file()), None
+    )
+    if python_include is None or (IS_WINDOWS and python_lib_dir is None):
+        raise RuntimeError(
+            "Python development headers/libraries were not found. Install matching "
+            "CPython or set OMNI_XPU_PYTHON_INCLUDE and OMNI_XPU_PYTHON_LIB."
+        )
+    return python_include, python_lib_dir
 
 
 def prepare_bmg_cute_include_overlay(cutlass_root, build_temp):
@@ -375,7 +475,7 @@ def get_onednn_paths():
             actual = ".".join(map(str, header_version))
             raise RuntimeError(
                 f"Unsupported oneDNN headers {actual} from {include_dir}; "
-                f"expected {expected} to match onednn==2025.3.0"
+                f"expected the validated build version {expected}"
             )
         library_version = get_onednn_library_version(runtime_library)
         if library_version is not None and library_version != header_version:
@@ -394,8 +494,9 @@ def get_onednn_paths():
         )
 
     if IS_WINDOWS:
+        expected = ".".join(map(str, VALIDATED_ONEDNN_VERSION))
         raise RuntimeError(
-            "A matched oneDNN 3.9.1 development installation was not found. "
+            f"A matched oneDNN {expected} development installation was not found. "
             "Set DNNLROOT to a complete oneAPI installation, or set "
             "ONEDNN_INCLUDE, ONEDNN_LIB, and ONEDNN_RUNTIME to matched files."
         )
@@ -521,8 +622,9 @@ class ICPXBuildExt(build_ext):
         # wheel (a hard-coded flag breaks if the wheel used the other ABI).
         torch_cxx11_abi = int(bool(torch.compiled_with_cxx11_abi()))
         
-        # Get Python include
-        python_include = sysconfig.get_path("include")
+        # Embedded Python distributions omit these development files, so fall
+        # back to a matching full CPython installation when necessary.
+        python_include, python_lib_dir = python_development_paths()
         
         # Output paths
         output_path = Path(self.get_ext_fullpath(ext.name))
@@ -577,13 +679,9 @@ class ICPXBuildExt(build_ext):
 
         if IS_WINDOWS:
             # Windows compile command using icx
-            python_lib_dir = sysconfig.get_config_var("LIBDIR") or str(Path(sys.executable).parent / "libs")
             python_version = f"{sys.version_info.major}{sys.version_info.minor}"
-            
-            cmd = [
-                icpx,
-                "-fsycl",
-            ]
+            compile_commands = None
+            cmd = [icpx, "-fsycl"]
             
             if is_lgrf:
                 cmd += [
@@ -603,14 +701,12 @@ class ICPXBuildExt(build_ext):
                     cmd.append(f"/I{onednn_include}")
                 cmd += [str(s) for s in sources]
             else:
-                cmd += [
-                    "-fsycl-targets=spir64_gen",
-                    "-Xsycl-target-backend",
-                    f"-device {BUILD_XPU_TARGET}",
+                core_aot_args = get_core_aot_compile_args(BUILD_XPU_TARGET)
+                common_compile = [
+                    *core_aot_args,
                     "-fsycl-esimd-force-stateless-mem",
                     "/O2", "/DNDEBUG",
                     f"/D{XPU_ARCH_MACRO}=1",
-                    "/DOMNI_XPU_CORE_AOT=1",
                     "/DNOMINMAX",
                     "/DWIN32_LEAN_AND_MEAN",
                     "/EHsc",  # Enable C++ exception handling
@@ -620,16 +716,28 @@ class ICPXBuildExt(build_ext):
                 # headers selected with the external oneDNN library first so
                 # declarations and exported symbols use the same ABI.
                 if has_onednn:
-                    cmd.append(f"/I{onednn_include}")
-                cmd += [
+                    common_compile.append(f"/I{onednn_include}")
+                common_compile += [
                     f"/I{python_include}",
                     f"/I{torch_include}",
                     f"/I{torch_include}\\torch\\csrc\\api\\include",
                     f"/I{src_dir}",
-                    "/LD",  # Create DLL
-                    f"/Fe:{output_path}",  # Output file
                 ]
-                cmd += [str(s) for s in sources] + [
+                object_dir = Path(self.build_temp) / ext.name.replace(".", "_")
+                object_dir.mkdir(parents=True, exist_ok=True)
+                objects = [object_dir / f"{source.stem}.obj" for source in sources]
+                compile_commands = [
+                    [
+                        icpx, "-fsycl", *common_compile,
+                        "/c", str(source), f"/Fo{obj}",
+                    ]
+                    for source, obj in zip(sources, objects)
+                ]
+                cmd += [
+                    *core_aot_args,
+                    "/LD",
+                    *[str(obj) for obj in objects],
+                    f"/Fe:{output_path}",
                     "/link",
                     f"/LIBPATH:{torch_lib}",
                     f"/LIBPATH:{python_lib_dir}",
@@ -751,21 +859,42 @@ class ICPXBuildExt(build_ext):
                     ext.name, torch_runtime_lib, runtime_lib, onednn_lib
                 )
         
-        print(f"Compile command: {' '.join(cmd)}")
-        
         # Run compiler
         # oneAPI setvars also injects oneDNN through the compiler include-path
         # environment. Clang can de-duplicate that path against the earlier -I
         # and retain the environment copy after torch/include. Remove only the
         # duplicate entry; all other oneAPI paths remain unchanged.
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=get_compile_env(onednn_include if has_onednn else ""),
-        )
+        compiler_env = get_compile_env(onednn_include if has_onednn else "")
+        compiler_env = add_aot_tools_to_path(compiler_env, icpx)
+        if IS_WINDOWS and compile_commands:
+            jobs = build_job_count(len(compile_commands))
+            print(
+                f"Compiling {len(compile_commands)} translation units with {jobs} "
+                "parallel jobs (set OMNI_XPU_BUILD_JOBS to override)"
+            )
+            failures = []
+            with ThreadPoolExecutor(max_workers=jobs) as executor:
+                futures = {
+                    executor.submit(run_compiler, command, compiler_env): command
+                    for command in compile_commands
+                }
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result.returncode != 0:
+                        failures.append((futures[future], result))
+            if failures:
+                command, result = failures[0]
+                print("Failed compile command:", " ".join(command))
+                print("STDOUT:", result.stdout)
+                print("STDERR:", result.stderr)
+                raise RuntimeError(
+                    f"Compilation failed in {len(failures)} translation unit(s)"
+                )
+            print(f"Link command: {' '.join(cmd)}")
+            result = run_compiler(cmd, compiler_env)
+        else:
+            print(f"Compile command: {' '.join(cmd)}")
+            result = run_compiler(cmd, compiler_env)
         
         if result.returncode != 0:
             print("STDOUT:", result.stdout)
@@ -831,12 +960,18 @@ def get_long_description():
 # default so a normal build cannot silently omit the default attention backend.
 # Set OMNI_XPU_REQUIRE_CUTE=0 explicitly for a core-only build (including
 # Windows, where the CUTE extension is not supported).
+_is_dg2_target = BUILD_XPU_TARGET == "dg2"
 _ext_modules = [
     ICPXExtension("omni_xpu_kernel._C", sourcedir="."),
     ICPXExtension("omni_xpu_kernel.lgrf_uni.lgrf_sdp", sourcedir="."),
 ]
+# CUTE FMHA remains unsupported on DG2; the DG2 SDP sidecar uses the native
+# WG=32 ESIMD kernel (see lgrf_uni/single_kernels/flash.attn.b.mha.dg2.h).
 _cutlass_sycl_root = os.environ.get("CUTLASS_SYCL_ROOT", "")
-_cutlass_sycl_required = os.environ.get("OMNI_XPU_REQUIRE_CUTE", "1") != "0"
+_cutlass_default = "0" if _is_dg2_target else "1"
+_cutlass_sycl_required = os.environ.get(
+    "OMNI_XPU_REQUIRE_CUTE", _cutlass_default
+) != "0"
 _cutlass_sycl_dirs = ("include", "tools/util/include", "examples/common", "applications")
 _cutlass_sycl_available = bool(_cutlass_sycl_root) and all(
     os.path.isdir(os.path.join(_cutlass_sycl_root, path)) for path in _cutlass_sycl_dirs
@@ -846,6 +981,10 @@ if _cutlass_sycl_required and IS_WINDOWS:
         "CUTE is required by default but unsupported on Windows; "
         "set OMNI_XPU_REQUIRE_CUTE=0 for an explicit core-only build"
     )
+if _is_dg2_target and _cutlass_sycl_required:
+    raise RuntimeError(
+        "CUTE FMHA is not supported by the A770/DG2 core-only profile"
+    )
 if _cutlass_sycl_required and not _cutlass_sycl_available:
     raise RuntimeError(
         "CUTE is required by default; set CUTLASS_SYCL_ROOT containing: "
@@ -853,7 +992,7 @@ if _cutlass_sycl_required and not _cutlass_sycl_available:
         + f"; got {_cutlass_sycl_root!r}"
         + ". Set OMNI_XPU_REQUIRE_CUTE=0 only for an explicit core-only build."
     )
-if not IS_WINDOWS and _cutlass_sycl_available:
+if not _is_dg2_target and not IS_WINDOWS and _cutlass_sycl_available:
     _ext_modules.append(ICPXExtension("omni_xpu_kernel.cute.cute_fmha_torch", sourcedir="."))
 
 setup(
