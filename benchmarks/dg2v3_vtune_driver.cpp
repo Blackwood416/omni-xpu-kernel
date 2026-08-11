@@ -99,6 +99,7 @@ int main(int argc, char** argv) {
   std::printf("steady per-call: %.3f ms\n",
               std::chrono::duration<double, std::milli>(t3 - t2).count() / 8);
   std::printf("done %d iterations\n", ITERS);
+  q.wait();  // async sidecar: keep USM alive until all kernels finish
 
   sycl::free(qs, q);
   sycl::free(ks, q);

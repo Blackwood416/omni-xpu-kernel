@@ -101,6 +101,9 @@ namespace dg2v3 {
 #ifndef DG2V3_FUSED_MAX_Q
 #define DG2V3_FUSED_MAX_Q 1024
 #endif
+#ifndef DG2V3_FUSED_MAX_TILES
+#define DG2V3_FUSED_MAX_TILES 128
+#endif
 
 template <typename T> struct IsFp16V3 : std::false_type {};
 template <> struct IsFp16V3<sycl::half> : std::true_type {};
@@ -802,7 +805,15 @@ inline void runSdpV3(
   // Small qLen: fuse K/V packing into the attention kernel (one submit, one
   // wait; the per-WG repack cost is small when qTiles is small). Larger
   // qLen keeps the two-kernel path so K/V are packed only once.
-  const bool useFused = qLen <= DG2V3_FUSED_MAX_Q && !attnOnly && !packOnly;
+  // Fused packing repacks K/V once per qTile work-group, so its redundancy
+  // is qTiles * kvTiles (BN=64 tile count). Keep fused only when that
+  // product is small; otherwise the two-kernel path wins because K/V are
+  // packed once globally.
+  const int qTilesFused = (qLen + 127) / 128;
+  const int kvTilesFused = (kvLen + 63) / 64;
+  const bool useFused = qLen <= DG2V3_FUSED_MAX_Q &&
+                        qTilesFused * kvTilesFused <= DG2V3_FUSED_MAX_TILES &&
+                        !attnOnly && !packOnly;
   V3Buffers buf;
   if (!useFused) {
     {
