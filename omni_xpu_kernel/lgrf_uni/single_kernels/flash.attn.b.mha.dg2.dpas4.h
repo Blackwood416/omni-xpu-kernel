@@ -607,23 +607,36 @@ ESIMD_INLINE void attnDg2(
         const float mTile = __ESIMD_NS::detail::reduce<
             float, float, BN,
             __ESIMD_NS::detail::esimd_apply_reduced_max>(svec);
+        // Stable online update: never exponentiate a positive difference.
+        // If the new tile lowers the row max, scale this tile's p/l by
+        // exp(m_new - m_old) (<=1); if it raises the max, scale the previous
+        // accumulator/l by exp(m_old - m_new) (<=1). Every rescale is <=1,
+        // so large score spans cannot overflow fp32.
+        const float oldM = mArr[r];
+        float rescalePrev = 1.0f;
+        float rescaleCur = 1.0f;
+        if (mTile > oldM) {
+          rescalePrev = __ESIMD_NS::exp2<float, 1>(
+              simd<float, 1>((oldM - mTile) * LOG2E))[0];
+        } else if (mTile < oldM) {
+          rescaleCur = __ESIMD_NS::exp2<float, 1>(
+              simd<float, 1>((mTile - oldM) * LOG2E))[0];
+        }
         float lTile = 0.0f;
         svec = (svec - mTile) * LOG2E;
         simd<float, BN> pvec = __ESIMD_NS::exp2<float, BN>(svec);
 #pragma unroll
         for (int p = 0; p < PG; p++) {
           simd<float, 16> p16 = pvec.template select<16, 1>(p * 16);
-          simd<ElemT, 16> ph = convert<ElemT>(p16);
+          simd<ElemT, 16> ph = convert<ElemT>(p16 * rescaleCur);
           lTile += __ESIMD_NS::detail::reduce<
               float, float, 16, __ESIMD_NS::detail::esimd_apply_sum>(p16);
           pChunkAll.template select<16, 1>(p * RPT * 16 + r * 16) = ph;
         }
-        const float rescale = __ESIMD_NS::exp2<float, 1>(
-            simd<float, 1>((mArr[r] - mTile) * LOG2E))[0];
-        lArr[r] = lArr[r] * rescale + lTile;
-        mArr[r] = mTile;
+        lArr[r] = lArr[r] * rescalePrev + lTile * rescaleCur;
+        mArr[r] = mTile > oldM ? mTile : oldM;
         acc.template select<128, 1>(r * 128) =
-            acc.template select<128, 1>(r * 128) * rescale;
+            acc.template select<128, 1>(r * 128) * rescalePrev;
       }
     } else {
       // S*V isolation test: zero p so the DPAS output is 0.
