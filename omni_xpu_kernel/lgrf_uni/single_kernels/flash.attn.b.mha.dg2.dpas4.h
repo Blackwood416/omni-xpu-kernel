@@ -95,6 +95,9 @@ namespace dg2v4 {
 #ifndef DG2V4_RPT
 #define DG2V4_RPT 8
 #endif
+#ifndef DG2V4_FUSED_RPT
+#define DG2V4_FUSED_RPT 4
+#endif
 #ifndef DG2V4_BN
 // Measured best on A770 (driver 32.0.101.8860, oneAPI 2026.1, doubleGRF):
 // L=8192/H=32/D=128 fp16 79 ms (BN=128) vs 105 ms (BN=64); torch SDPA 43 ms.
@@ -359,7 +362,7 @@ ESIMD_INLINE void attnDg2(
   // is the stable geometry; any spill is the suspected TDR trigger.
   // Fused small-shape path keeps RPT=4 (register-assembled A); the
   // two-kernel path reads a pre-packed A layout and runs RPT=DG2V4_RPT.
-  constexpr int RPT = FUSED ? 4 : DG2V4_RPT;
+  constexpr int RPT = FUSED ? DG2V4_FUSED_RPT : DG2V4_RPT;
   constexpr int QGRP = 32 * RPT;    // query rows per work-group
   // The fused single-kernel path (small qLen) packs K/V per work-group from
   // the raw row-major buffers and therefore uses BN=64 so the kvZero flags
@@ -814,8 +817,9 @@ inline void runSdpV4(
       (static_cast<uint64_t>(static_cast<uint32_t>(qLen)) << 16) |
       static_cast<uint32_t>(kvLen);
 
-  // Fused uses RPT=4 (QGRP=128); non-fused uses RPT=DG2V4_RPT (QGRP=32*RPT).
-  const int qTilesFused = (qLen + 127) / 128;
+  // Fused uses RPT=DG2V4_FUSED_RPT; non-fused uses RPT=DG2V4_RPT.
+  const int qTilesFused =
+      (qLen + 32 * DG2V4_FUSED_RPT - 1) / (32 * DG2V4_FUSED_RPT);
   const int qTilesPack =
       (qLen + 32 * DG2V4_RPT - 1) / (32 * DG2V4_RPT);
   const int packGroups = headQ * nTiles;
