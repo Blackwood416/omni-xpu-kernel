@@ -374,7 +374,11 @@ torch::Tensor sdp(torch::Tensor q, torch::Tensor k, torch::Tensor v) {
             const_cast<void*>(alpha_ptr),
             out.data_ptr(),
             static_cast<int>(q.size(1)),
+#if defined(OMNI_XPU_ARCH_DG2)
+            static_cast<int>(kv_len),
+#else
             static_cast<int>(kv_len + kv_pad),
+#endif
             static_cast<int>(q.size(2)),
             static_cast<int>(k.size(2)),
             &queue);

@@ -55,6 +55,7 @@ namespace dg2 {
 }
 #include "single_kernels/flash.attn.b.mha.dg2.dpas.h"
 #include "single_kernels/flash.attn.b.mha.dg2.dpas3.h"
+#include "single_kernels/flash.attn.b.mha.dg2.dpas4.h"
 #endif
 
 // Helper macro: common entry-point boilerplate
@@ -102,7 +103,7 @@ extern "C" ESIMD_KERNEL_API void sdp_fp16(
         });
     }).wait();
 #else
-    dg2v3::runSdpV3<fp16>(
+    dg2v4::runSdpV4<fp16>(
         pQ, pK, pV, pA, pO,
         static_cast<int>(aLen), static_cast<int>(kvLen),
         static_cast<int>(hQ), static_cast<int>(hKv), q);
@@ -158,7 +159,7 @@ extern "C" ESIMD_KERNEL_API void sdp_bf16io(
         });
     }).wait();
 #else
-    dg2v3::runSdpV3<bf16>(
+    dg2v4::runSdpV4<bf16>(
         pQ, pK, pV, pA, pO,
         static_cast<int>(aLen), static_cast<int>(kvLen),
         static_cast<int>(hQ), static_cast<int>(hKv), q);
@@ -205,7 +206,7 @@ extern "C" ESIMD_KERNEL_API void sdp_fp16_fast(
 #endif
     SDP_ENTRY_VARS
 #if defined(OMNI_XPU_ARCH_DG2)
-    dg2v3::runSdpV3<fp16>(
+    dg2v4::runSdpV4<fp16>(
         pQ, pK, pV, pA, pO,
         static_cast<int>(aLen), static_cast<int>(kvLen),
         static_cast<int>(hQ), static_cast<int>(hKv), q);
