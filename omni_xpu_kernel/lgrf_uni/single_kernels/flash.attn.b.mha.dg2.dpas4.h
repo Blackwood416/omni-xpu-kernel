@@ -83,6 +83,13 @@
 //     (fp16 C requires N=16, which is numerically wrong on A770).
 //   - Reading packedV directly from global instead of staging via SLM
 //     measured 172 ms vs 105 ms at BN=64 (cooperative SLM staging wins).
+//   - RPT=6 with BN=128 compiled without spills but DEVICE_LOST on the
+//     first real launch; keep RPT8/BN64 for the two-kernel path.
+//   - WG=64 for the non-fused attn kernel produced wrong outputs even on a
+//     single KV tile (no TDR), so A770 staging/barrier geometry stays WG=32.
+//   - Fused BN=128 is numerically wrong on this stack (single-tile error
+//     ~0.12); fused stays BN=64.
+//   - Fused RPT=6/BN=64 spills 1.7-2.0 KB, so fused stays RPT=4.
 
 #include <mutex>
 #include <cstdlib>
