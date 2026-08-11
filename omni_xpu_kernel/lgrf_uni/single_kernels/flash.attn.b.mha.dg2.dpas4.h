@@ -42,7 +42,8 @@
 //     single KV tile (no TDR), so A770 staging/barrier geometry stays WG=32.
 //   - Fused BN=128 is numerically wrong on this stack (single-tile error
 //     ~0.12); fused stays BN=64.
-//   - Fused RPT=6/BN=64 spills 1.7-2.0 KB, so fused stays RPT=4.
+//   - Fused RPT=6 spills at both BN=64 (1.7-2.0 KB) and BN=32 (0.9-1.3 KB),
+//     so fused stays RPT=4.
 
 #include <mutex>
 #include <cstdlib>
