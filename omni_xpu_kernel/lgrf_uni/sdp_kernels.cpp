@@ -54,7 +54,6 @@ namespace dg2 {
 #include "single_kernels/flash.attn.b.mha.dg2.h"
 }
 #include "single_kernels/flash.attn.b.mha.dg2.dpas.h"
-#include "single_kernels/flash.attn.b.mha.dg2.dpas3.h"
 #include "single_kernels/flash.attn.b.mha.dg2.dpas4.h"
 #endif
 

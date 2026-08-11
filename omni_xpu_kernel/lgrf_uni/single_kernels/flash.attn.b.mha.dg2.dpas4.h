@@ -4,75 +4,28 @@
 // Small shapes keep the fused RPT=4 kernel; the host passes ORIGINAL kv_len
 // so padded rows are masked by the row-index check (no kvZero flags needed).
 //
-// v2 showed correct DPAS math but no speedup: each thread still serially
-// visited every K/V row and replicated one query row across 8 DPAS rows
-// (1/8 XMX utilization). v3 fixes both:
-//
-//   Kernel 1 (pack): one pass over K/V per head writes the VNNI-packed
-//   operand layout to global buffers (packedK / packedV / kvZero), so every
-//   query work-group reuses the same packed data instead of repacking it.
-//   Layouts are identical to v2's SLM blocks.
-//
-//   Kernel 2 (attn): WG=32, each thread owns 4 query rows. DPAS is M=8 with
-//   4 *distinct* rows (50% XMX rows; RPT=8 was attempted and device-lost —
-//   see the RPT constant note below). The packed K/V tile is staged
-//   cooperatively into SLM once per (query-group, kv-tile); the per-thread
-//   fp32 accumulator, query rows, scores, and softmax values live in
-//   registers (SLM is shared by all 32 lanes, so per-lane state must not be
-//   staged there). q_len is processed 128 rows per work-group.
-//
-// SLM layout (2*BN*64*4 bytes: 32 KB at BN=64, 64 KB at BN=128; K and V are
-// staged into separate regions at the top of each tile, which removes the
-// QK -> S*V barrier):
-//   KSTAGE  packed K tile
-//   VSTAGE  packed V tile
-//   kvZero flags are NOT in SLM: they are loaded per tile from the global
-//   packed buffer into registers (the wrapper passes the padded kv_len, so
-//   zero-row flags are the only reliable padding mask; BN=128 also leaves no
-//   SLM room for a flags region).
-//
-// Only HD=128 is implemented; D64 keeps the v1/v2 kernels.
-//
-// v4 dispatch (host side):
-//   qLen <= 1024 -> fused single kernel (attnDg2<true>): K/V are packed per
-//   work-group from the raw row-major buffers into SLM (BN=64 layout with a
-//   kvZero flags region), so small shapes pay one submit instead of two.
-//   qLen > 1024  -> two kernels (packKvDg2 + attnDg2<false>): K/V packed
-//   once into global buffers (BN=128 layout, flags read from global).
+// Dispatch:
+//   qLen <= 1024 && qTilesFused * kvTilesFused <= 128 -> fused
+//   attnDg2<true>: K/V are packed per work-group from raw row-major buffers
+//   into SLM (BN=64, RPT=4, WG=32), one submit.
+//   Otherwise -> packQDg2 + packKvDg2 + attnDg2<false>: Q/K/V are packed
+//   once into global operand layouts (BN=64, RPT=8, WG=32), three submits.
 //   Both paths are async (no internal queue.wait in release builds); the
 //   caller's torch stream synchronizes, matching torch op semantics.
 //
-// Measured on A770 (driver 32.0.101.8860, oneAPI 2026.1, doubleGRF),
-// H=32/D=128 fp16, wall median:
-//   L= 512: v4 0.57 ms vs torch 0.66 ms
-//   L=1024: v4 1.34 ms vs torch 1.36 ms
-//   L=2048: v4 2.9  ms vs torch 3.78 ms
-//   L=4096: v4 9.8  ms vs torch 13.5 ms
-//   L=8192: v4 40   ms vs torch 42.2 ms
-// v4 wins on every benchmarked shape. History: v3 BN=128 79 ms, v3 BN=64
-// 105 ms, v2 110 ms.
+// SLM layout: KSTAGE at 0, VSTAGE at BN*64*4. K and V are staged into
+// separate regions at the top of each tile, so QK -> S*V needs no extra
+// barrier (2 barriers/tile).
 //
-// VTune-driven changes (instruction-count then full-compute):
-//   - DPAS A operand chunks stored chunk-major in one simd (qChunkAll /
-//     pChunkAll) so the QK/S*V A operand is a contiguous 64-element select.
-//   - K and V staged into separate SLM regions at the top of each tile,
-//     removing the QK -> S*V barrier (3 barriers/tile -> 2; SLM 64 KB at
-//     BN=128 is exactly K 32 KB + V 32 KB).
-//   - Softmax exp2 vectorized with the ESIMD hardware native_exp2 (was a
-//     scalar per-element software sequence: SP instructions 130G -> 41G).
-//   - Softmax max reduced with a vector tree, lTile via vector reduce, and
-//     p written chunk-major straight from the exp2 vector.
-//   - Scores live directly in per-row simd vectors (svecArr), no scalar
-//     staging round trip between QK and softmax.
-//   - DPAS A rows 4..7 are not zero-filled (their C rows are never read),
-//     removing 4-GRF fills per DPAS.
-//   Total attn GPU instructions 404G -> 194G per 12 launches; XVE stall was
-//   57% (SLM read 5.56 TB/s near the roof) before these changes.
-//   Small-shape overhead was then removed by: fusing pack into attn for
-//   qLen<=1024, dropping the per-call queue.wait (async dispatch), and
-//   caching the python sidecar glob (was ~0.5 ms per call).
-// The remaining gap to the hardware roof is the 50% zero-row waste in DPAS
-// (RPT>4 device-losts whenever the compiler spills) plus SLM operand relay.
+// Measured on A770 (driver 32.0.101.8860, oneAPI 2026.1, doubleGRF),
+// H=32/D=128 fp16 wall median: L=512 0.54 vs 0.60 ms, L=1024 ~1.2-1.4 ms vs
+// torch 1.04-1.36 ms, L=2048 2.75 vs 3.29 ms, L=4096 8.8 vs 12.6 ms,
+// L=8192 34.7 vs 41.4 ms. Extended 40-sample runs also win 1024x4096
+// (2.91 vs 3.20 ms), 1024x1024 H48 (1.43 vs 1.49), and 512x512 H48
+// (0.64 vs 0.65).
+//
+// VTune xpu-offload (1024x4096): attn ~73% of GPU time, packKv ~23%,
+// packQ ~3%. The remaining attn cost is K/V SLM staging and operand relay.
 //
 // Negative results recorded for this stack (do not re-run without a
 // watchdog):
@@ -197,7 +150,6 @@ template <typename ElemT>
 ESIMD_INLINE void packKvDg2(
     uint8_t* packedK,
     uint8_t* packedV,
-    uint8_t* kvZero,
     const uint8_t* kState,
     const uint8_t* vState,
     uint32_t kvLen,
@@ -332,7 +284,6 @@ ESIMD_INLINE void attnDg2(
     const uint8_t* vState,
     const uint8_t* packedK,
     const uint8_t* packedV,
-    const uint8_t* kvZero,
     const float* normAlpha,
     uint8_t* out,
     float* dbg,
@@ -902,7 +853,6 @@ inline void runSdpV4(
             packKvDg2<ElemT>(
                 static_cast<uint8_t*>(buf.packedK),
                 static_cast<uint8_t*>(buf.packedV),
-                nullptr,
                 static_cast<const uint8_t*>(k),
                 static_cast<const uint8_t*>(v),
                 static_cast<uint32_t>(kvLen),
@@ -924,7 +874,6 @@ inline void runSdpV4(
                   nullptr,
                   static_cast<const uint8_t*>(k),
                   static_cast<const uint8_t*>(v),
-                  nullptr,
                   nullptr,
                   nullptr,
                   static_cast<const float*>(alpha),
@@ -956,7 +905,6 @@ inline void runSdpV4(
                   nullptr,
                   static_cast<const uint8_t*>(buf.packedK),
                   static_cast<const uint8_t*>(buf.packedV),
-                  nullptr,
                   static_cast<const float*>(alpha),
                   static_cast<uint8_t*>(out),
                   dbgBuf,
