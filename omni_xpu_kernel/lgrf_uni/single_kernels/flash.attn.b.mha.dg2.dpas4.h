@@ -853,7 +853,6 @@ inline void runSdpV4(
   const int kvTilesFused = (kvLen + 63) / 64;
   const bool useFused = qLen <= DG2V4_FUSED_MAX_Q &&
                         qTilesFused * kvTilesFused <= DG2V4_FUSED_MAX_TILES &&
-                        (headQ <= 32 || qLen <= 512) &&
                         !attnOnly && !packOnly;
   V4Buffers buf;
   if (!useFused) {
