@@ -753,8 +753,12 @@ inline void runSdpV4(
   constexpr int BN = DG2V4_BN;
   const int nTiles = (kvLen + BN - 1) / BN;
   const size_t tileWords = static_cast<size_t>(BN) * 64;
+  // Cache identity includes headKv too: packQ depends on headQ/qLen, while
+  // packK/V buffer sizes depend on headKv/kvLen. Reusing across a GQA head
+  // count change would alias differently-sized buffers.
   const uint64_t key =
       (static_cast<uint64_t>(headQ) << 48) |
+      (static_cast<uint64_t>(headKv) << 40) |
       (static_cast<uint64_t>(static_cast<uint32_t>(qLen)) << 16) |
       static_cast<uint32_t>(kvLen);
 
