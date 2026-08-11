@@ -55,26 +55,20 @@ DG2 原生 ESIMD kernel（`flash.attn.b.mha.dg2.h`），A770 上需显式设置
 - 稳定性：连续调用确定性一致；回归门禁
   `tests/repro_a770_sdp_device_lost.py` 通过（有限输出 + 误差阈值）。
 - 性能（A770, driver 32.0.101.8860, oneAPI 2026.1, wall median,
-  D=128, fp16, H=32）：v4 DPAS 变体（`flash.attn.b.mha.dg2.dpas3.h`，
-  RPT=4 + doubleGRF，qLen≤1024 fused 单 kernel / qLen>1024 两 kernel，
-  异步 dispatch）在全部基准形状反超 Torch SDPA：L=512 0.57 vs 0.66 ms，
-  L=1024 1.34 vs 1.36 ms，L=2048 2.9 vs 3.78 ms，L=4096 9.8 vs 13.5 ms，
-  L=8192 40 vs 42.2 ms。历史基线：v3 BN=128 79 ms、v3 BN=64 105 ms、
-  v2 110 ms。优化由 VTune 驱动：exp2 向量化（硬件 native_exp2，SP 指令
-  130G→41G）、QK/S*V 的 A 操作数 chunk-major 预排、K/V 分 SLM 区同时
-  staging（barrier 3→2/tile）、分数直接存 per-row 向量、DPAS A 未用行
-  不清零（attn 总指令 404G→194G/12 次）；小形状开销通过 fused pack、
-  去掉每调用 queue.wait（异步，调用方 stream 同步）、缓存 python
-  sidecar glob（原 ~0.5 ms/次）消除。v3 已修复早期两处正确性缺陷：
-  SLM 每线程状态竞争（QSTAGE/ACC/SC/PALL 被 32 个 lane 共享导致互相
-  覆盖）和 pack kernel kvZero 偏移双重加 tile（tile≥1 全部被误 mask）。
+  D=128, fp16, H=32）：v4.1 DPAS 变体
+  （`flash.attn.b.mha.dg2.dpas4.h`）在扩展形状上反超 Torch SDPA。
+  非 fused 路径先把 Q 打包成 DPAS A 操作数布局（每 QK 操作数一个 256B
+  块），RPT=8 达到 100% XMX 行且无 spill；小形状保留 fused RPT=4/BN=64
+  单 kernel；宿主传原始 kv_len，padding 由行号掩码处理，不再写 kvZero。
+  40 样本交错结果：L=512 0.54 vs 0.60 ms，L=2048 2.75 vs 3.29 ms，
+  L=4096 8.8 vs 12.6 ms，L=8192 34.7 vs 41.4 ms；1024x4096 2.91 vs
+  3.20 ms、1024x1024 H48 1.43 vs 1.49 ms、512x512 H48 0.64 vs 0.65 ms。
   D64 仍走 v1 FMA。
-- 已记录的负面结果（同一驱动/编译器栈）：RPT=6/8（DPAS 行 100% 利用）
-  只要有编译器 spill（7.5-16 KB）就触发 `UR_RESULT_ERROR_DEVICE_LOST`；
-  N=8 下 fp16 DPAS 累加被 dpas.hpp 拒绝（fp16 C 仅 N=16，而 N=16 在 A770
-  上数值错误）；packedV 不经 SLM 直接读全局比 SLM staging 慢约 60%。
-  当前与 Torch SDPA 的剩余差距主要来自 DPAS 50% 零行浪费与 ESIMD
-  A/B SLM relay 指令量。
+- 已记录的负面结果（同一驱动/编译器栈）：RPT=6/8 只要有编译器 spill
+  就触发 `UR_RESULT_ERROR_DEVICE_LOST`；RPT=6/BN=128 编译无 spill 但实机
+  DEVICE_LOST；WG=64 的非 fused attn 单 tile 输出错误；fused BN=128 数值
+  错误、fused RPT=6 在 BN=64/32 均 spill；N=8 下 fp16 DPAS 累加被
+  dpas.hpp 拒绝；packedV 不经 SLM 直接读全局比 SLM staging 慢约 60%。
 
 本文不把 ComfyUI Portable 当作编译环境。编译环境位于项目目录内，
 Portable 只用于最终安装和运行测试，避免修改其他项目的 Python 环境。
@@ -372,6 +366,12 @@ if not exist "%BUILD_ROOT%\wheelhouse\patched" mkdir "%BUILD_ROOT%\wheelhouse\pa
   --no-build-isolation ^
   --no-deps
 ```
+
+`setup.py` 会把 Windows 核心扩展的多个 translation unit 并行编译。默认
+最多 8 个并行任务；需要手动控制时设置 `OMNI_XPU_BUILD_JOBS`（或
+`MAX_JOBS`），例如 `set OMNI_XPU_BUILD_JOBS=8` 后再执行 `pip wheel`。
+实测 DG2/Torch 2.13 全量 wheel 构建约 4-5 分钟，并行开关不会改变产物
+身份。
 
 `--no-build-isolation` 是必需的：构建必须读取当前 venv 中已安装的
 Torch XPU 头文件、库和版本。`--no-deps` 避免打包过程改变环境。
