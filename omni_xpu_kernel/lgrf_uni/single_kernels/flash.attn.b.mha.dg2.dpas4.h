@@ -747,6 +747,24 @@ inline std::unordered_map<uint64_t, V4Buffers>& v4_cache() {
   return cache;
 }
 
+constexpr size_t V4_CACHE_MAX = 2;
+
+inline std::vector<uint64_t>& v4_lru_order() {
+  static std::vector<uint64_t> order;
+  return order;
+}
+
+inline void v4_touch(uint64_t key) {
+  auto& order = v4_lru_order();
+  for (auto it = order.begin(); it != order.end(); ++it) {
+    if (*it == key) {
+      order.erase(it);
+      break;
+    }
+  }
+  order.push_back(key);
+}
+
 inline std::mutex& v4_mutex() {
   static std::mutex m;
   return m;
@@ -823,6 +841,30 @@ inline void runSdpV4(
       std::lock_guard<std::mutex> guard(v4_mutex());
       auto it = v4_cache().find(key);
       if (it == v4_cache().end()) {
+        // Bound the sidecar cache: H3-style runs at seq=20685 already hold
+        // ~0.9 GB of packed Q/K/V per shape; letting every new shape pile up
+        // pushes VRAM pressure and can make the next workflow run slower.
+        while (v4_lru_order().size() >= V4_CACHE_MAX &&
+               v4_cache().size() >= V4_CACHE_MAX) {
+          const uint64_t victim = v4_lru_order().front();
+          if (victim == key) {
+            break;
+          }
+          auto vit = v4_cache().find(victim);
+          if (vit != v4_cache().end()) {
+            // Do not free USM that an earlier async submission may still be
+            // reading; shape-change evictions are rare enough to pay a sync.
+            queue.wait();
+            sycl::free(vit->second.packedQ, queue);
+            sycl::free(vit->second.packedK, queue);
+            sycl::free(vit->second.packedV, queue);
+            v4_cache().erase(vit);
+          }
+          auto& order = v4_lru_order();
+          if (!order.empty()) {
+            order.erase(order.begin());
+          }
+        }
         buf.packedQ = sycl::aligned_alloc_device(
             64,
             static_cast<size_t>(headQ) * qTilesPack * WG *
@@ -837,8 +879,10 @@ inline void runSdpV4(
             static_cast<size_t>(headQ) * nTiles * tileWords * 4,
             queue);
         v4_cache()[key] = buf;
+        v4_touch(key);
       } else {
         buf = it->second;
+        v4_touch(key);
       }
     }
   }
