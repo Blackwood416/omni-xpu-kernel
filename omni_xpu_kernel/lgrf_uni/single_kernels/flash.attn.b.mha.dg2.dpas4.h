@@ -225,7 +225,6 @@ ESIMD_INLINE void packKvDg2(
 #pragma unroll
     for (int g = lid / 4; g < KG; g += WG / 4) {
       const int c0 = (lid % 4) * 2;
-      simd<float, 8> rowAbs = 0;
 #pragma unroll
       for (int cc = 0; cc < 2; cc++) {
         const int c = c0 + cc;
@@ -242,10 +241,6 @@ ESIMD_INLINE void packKvDg2(
                 overaligned_tag<16>{});
           }
           rows.template select<16, 1>(r * 16) = chunk;
-          if (cc == 0) {
-            simd<float, 16> f = chunk;
-            rowAbs[r] = dg2::dg2_sum<16>(__ESIMD_NS::abs(f));
-          }
         }
         simd<uint32_t, 64> words;
 #pragma unroll
@@ -267,17 +262,6 @@ ESIMD_INLINE void packKvDg2(
             words,
             overaligned_tag<16>{});
       }
-      simd<uint32_t, 8> flagGroup;
-#pragma unroll
-      for (int r = 0; r < 8; r++) {
-        flagGroup[r] = (rowAbs[r] > 0.0f) ? 1u : 0u;
-      }
-      block_store<uint32_t, 8>(
-          // Layout matches the attn kernel: kvZero[head * nTiles * BN + row].
-          reinterpret_cast<uint32_t*>(kvZero) +
-              static_cast<size_t>(headIdx) * nTiles * BN + kvBase + g * 8,
-          flagGroup,
-          overaligned_tag<16>{});
     }
   }
 
@@ -791,7 +775,6 @@ struct V4Buffers {
   void* packedQ = nullptr;
   void* packedK = nullptr;
   void* packedV = nullptr;
-  void* kvZero = nullptr;
 };
 
 inline std::unordered_map<uint64_t, V4Buffers>& v4_cache() {
@@ -884,10 +867,6 @@ inline void runSdpV4(
             64,
             static_cast<size_t>(headQ) * nTiles * tileWords * 4,
             queue);
-        buf.kvZero = sycl::aligned_alloc_device(
-            64,
-            static_cast<size_t>(headQ) * nTiles * BN * 4,
-            queue);
         v4_cache()[key] = buf;
       } else {
         buf = it->second;
@@ -923,7 +902,7 @@ inline void runSdpV4(
             packKvDg2<ElemT>(
                 static_cast<uint8_t*>(buf.packedK),
                 static_cast<uint8_t*>(buf.packedV),
-                static_cast<uint8_t*>(buf.kvZero),
+                nullptr,
                 static_cast<const uint8_t*>(k),
                 static_cast<const uint8_t*>(v),
                 static_cast<uint32_t>(kvLen),
@@ -977,7 +956,7 @@ inline void runSdpV4(
                   nullptr,
                   static_cast<const uint8_t*>(buf.packedK),
                   static_cast<const uint8_t*>(buf.packedV),
-                  static_cast<const uint8_t*>(buf.kvZero),
+                  nullptr,
                   static_cast<const float*>(alpha),
                   static_cast<uint8_t*>(out),
                   dbgBuf,
@@ -1019,17 +998,12 @@ inline void runSdpV4(
     std::vector<uint32_t> dumpK(4096), dumpV(4096);
     queue.memcpy(dumpK.data(), buf.packedK, 4096 * 4).wait();
     queue.memcpy(dumpV.data(), buf.packedV, 4096 * 4).wait();
-    std::vector<uint32_t> dumpZ(512);
-    queue.memcpy(dumpZ.data(), buf.kvZero, 512 * 4).wait();
     std::ofstream fk("C:/Temp/dg2v4_packedK.bin", std::ios::binary);
     fk.write(reinterpret_cast<const char*>(dumpK.data()), 4096 * 4);
     fk.close();
     std::ofstream fv("C:/Temp/dg2v4_packedV.bin", std::ios::binary);
     fv.write(reinterpret_cast<const char*>(dumpV.data()), 4096 * 4);
     fv.close();
-    std::ofstream fz("C:/Temp/dg2v4_kvZero.bin", std::ios::binary);
-    fz.write(reinterpret_cast<const char*>(dumpZ.data()), 512 * 4);
-    fz.close();
   }
 #endif
 }
