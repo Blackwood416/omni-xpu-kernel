@@ -747,7 +747,10 @@ inline std::unordered_map<uint64_t, V4Buffers>& v4_cache() {
   return cache;
 }
 
-constexpr size_t V4_CACHE_MAX = 2;
+// H3-style seq=20683 needs ~0.9 GB of packed buffers per shape. Keep only
+// the most recent shape so a second workflow run does not pile up device
+// memory on top of an already VRAM-pressured ComfyUI model cache.
+constexpr size_t V4_CACHE_MAX = 1;
 
 inline std::vector<uint64_t>& v4_lru_order() {
   static std::vector<uint64_t> order;
