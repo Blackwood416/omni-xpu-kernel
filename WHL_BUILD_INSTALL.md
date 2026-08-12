@@ -70,6 +70,26 @@ DG2 原生 ESIMD kernel（`flash.attn.b.mha.dg2.h`），A770 上需显式设置
   错误、fused RPT=6 在 BN=64/32 均 spill；N=8 下 fp16 DPAS 累加被
   dpas.hpp 拒绝；packedV 不经 SLM 直接读全局比 SLM staging 慢约 60%。
 
+#### H3 INT8 长序列 offload 诊断（2026-08-12）
+
+`comfy-info8.log` 的两次完整 workflow（int8_convrot 权重、内置 UNet
+Loader）单次约 559-569 s。前 200 个 `seq=20683/head=56/D=128` block 占
+约 440 s；后续 3780 个 `seq=1797/head=32/D=64` block 仅约 90-100 s。
+
+- 已打点的 `int8_linear (20683,5376)x(28672,5376)` 实测只有约 35 ms
+  （oneDNN `jit:gemm:any`，sync-each wall median），但 ComfyUI 日志中该
+  事件到下一个 RMSNorm 的间隔约 0.85 s。慢的部分不在 OmniXPU kernel。
+- 同一 block 的 `fc2`（SwiGLU + 14336 宽线性）没有 `int8_linear` kernel
+  日志：vbar/offload cast 把 TensorWise INT8 权重反量化成 bf16，然后走
+  bf16 `F.linear`。离线复算该回退约 41 ms（反量化 8.5 ms + SwiGLU/bf16
+  linear 40.6 ms），仍远小于 0.85 s，剩余时间来自 vbar page-in/transfer。
+- A/B 建议：`OMNIXPU_INT8_DIRECT_CAST=1` 时，offloaded TensorWise INT8
+  模块直接拷 qdata/scale 上 XPU 并返回设备端 `QuantizedTensor`，绕过
+  bf16 反量化。qdata 搬运实测约 8-27 ms（36-110 MiB），int8 kernel
+  13-36 ms，合计约 20-60 ms/offloaded projection。
+- 复现探针：`benchmarks/dg2_int8_phase0_probe.py`（真实 H3 phase-0 形状：
+  qkv/fc1/fc2/out + CPU 搬运）。
+
 本文不把 ComfyUI Portable 当作编译环境。编译环境位于项目目录内，
 Portable 只用于最终安装和运行测试，避免修改其他项目的 Python 环境。
 
