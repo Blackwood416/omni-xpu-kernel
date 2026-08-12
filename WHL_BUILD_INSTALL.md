@@ -85,7 +85,8 @@ Loader）单次约 559-569 s。前 200 个 `seq=20683/head=56/D=128` block 占
   linear 40.6 ms），仍远小于 0.85 s，剩余时间来自 vbar page-in/transfer。
 - A/B 建议：`OMNIXPU_INT8_DIRECT_CAST=1` 时，offloaded TensorWise INT8
   模块直接拷 qdata/scale 上 XPU 并返回设备端 `QuantizedTensor`，绕过
-  bf16 反量化。qdata 搬运实测约 8-27 ms（36-110 MiB），int8 kernel
+  bf16 反量化（vbar 与普通 lowvram 均适用）。qdata 搬运实测约 8-27 ms
+  （36-110 MiB），int8 kernel
   13-36 ms，合计约 20-60 ms/offloaded projection。
 - 复现探针：`benchmarks/dg2_int8_phase0_probe.py`（真实 H3 phase-0 形状：
   qkv/fc1/fc2/out + CPU 搬运）。
