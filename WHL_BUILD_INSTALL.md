@@ -130,6 +130,14 @@ VBAR 边界预回收 + active VBAR 保护）带来的，不是 OmniXPU kernel �
 调试日志标记 `backend=omni_dg2_compat_fast`。可用
 `OMNIXPU_INT8_FAST_FORWARD=0` 关闭快路径做 A/B。
 
+实测（info17）快路径首次未生效的原因：H3 权重在 vbar 下驻留 CPU，
+`self.weight.device != input.device` 导致跳过；真实工作流里 qkv/out/fc1/fc2
+四个 Linear 的权重都在 CPU，按需 stream 进 GPU。因此快路径增加
+`OMNIXPU_INT8_FAST_FORWARD_COPY=1`（默认开）兜底：qdata/scale 不在
+XPU 时先 `.to(device)` 再跑同一个 omni kernel（与原路径每调用搬运的数据量
+相同，但跳过 from_float/dequant/dispatch）。设
+`OMNIXPU_INT8_FAST_FORWARD_COPY=0` 恢复严格 device 条件。
+
 本文不把 ComfyUI Portable 当作编译环境。编译环境位于项目目录内，
 Portable 只用于最终安装和运行测试，避免修改其他项目的 Python 环境。
 
