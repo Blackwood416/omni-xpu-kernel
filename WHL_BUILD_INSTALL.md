@@ -91,6 +91,45 @@ Loader）单次约 559-569 s。前 200 个 `seq=20683/head=56/D=128` block 占
 - 复现探针：`benchmarks/dg2_int8_phase0_probe.py`（真实 H3 phase-0 形状：
   qkv/fc1/fc2/out + CPU 搬运）。
 
+#### H3 主循环瓶颈归属（comfy-info14，AIMDO draft PR 生效后）
+
+`comfy-info14.log` 连跑两次完整 workflow：`314.73 s` / `259.84 s`，H3
+主模型阶段（`seq=20683`，200 block）两次均为约 160 s，VAE 阶段约 92-120 s。
+相比 `comfy-info8/13`（H3 约 440-495 s）是 AIMDO draft PR
+（`pr-windows-usm-free-hang`：保留原生 XPU allocator、Level Zero tracing、
+VBAR 边界预回收 + active VBAR 保护）带来的，不是 OmniXPU kernel 改动。
+
+`benchmarks/h3_main_phase_a770.py`（真实 H3 shape、sync-each）实测：
+
+- attention `(1,20683,56,128) bf16`：omni ESIMD v4 `405-410 ms`
+  （约 30 TFLOPS，接近 A770 bf16 峰值）；torch SDPA `431-451 ms`。
+  adapter 的 `BHLD->permute+contiguous->BLHD` 三份拷贝实测被隐藏
+  （406 vs 408 ms），不是 0.51 s 间隔的来源。
+- int8 oneDNN（tensorwise 真实量化权重）：qkv `29-35 ms`、fc1 `38-46 ms`、
+  out `13-15 ms`、fc2(SwiGLU+convrot) `33 ms`；torch bf16 反量化线性
+  分别约 `48-62 / 64-84 / 17-22 ms`。
+- RMSNorm `(20683,5376) bf16`：`1.4 ms`。
+- 完整 block（rms+qkv+attn+out+rms+fc1+fc2）串行实测 `556 ms/block`，
+  即纯 kernel 部分约 `111 s / 200 block`。日志阶段 160 s，差额约
+  `245 ms/block`（约 49 s/run）来自 `mixed_precision.Linear` 的
+  dispatch 开销：`QuantizedTensor.from_float` 先把激活量化，再经 torch
+  dispatch 反量化回 bf16，随后我们的 kernel 重新 rowwise 量化；
+  qkv/out/fc1 每次约 90-96 ms（dispatch->kernel 间隔）。
+
+- fc2 在无 LoRA/offload 状态下实际走 `linear_input_act` 的 registry
+  XPU 路径（`comfy_kitchen.backends.xpu.int8_linear` -> omni int8），
+  因此没有 `int8_linear` kernel 调试日志；日志缺失不代表 bf16 回退。
+  之前 info8 记录的 fc2 bf16 回退属于 vbar/offload/LoRA 状态。
+
+对应修复：`ComfyUI-OmniXPU/adapters/fp8_gemm.py` 的
+`mixed_precision.Linear` 增加 INT8 快路径——满足
+（XPU + `int8_tensorwise` + TensorWiseINT8Layout + 无 LoRA function +
+ 权重已驻留 XPU + 无 pre_quant_scale/input_scale）时直接调用
+`omni_int8.int8_linear`，跳过 from_float/dequant/dispatch 往返。
+数值路径与 `linear_input_act` 的 fc2 一致；其余条件一律回退原逻辑。
+调试日志标记 `backend=omni_dg2_compat_fast`。可用
+`OMNIXPU_INT8_FAST_FORWARD=0` 关闭快路径做 A/B。
+
 本文不把 ComfyUI Portable 当作编译环境。编译环境位于项目目录内，
 Portable 只用于最终安装和运行测试，避免修改其他项目的 Python 环境。
 
