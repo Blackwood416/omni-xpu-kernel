@@ -145,6 +145,19 @@ info18（copy=on）A/B：H3 主模型阶段约快 10 s（attention 间隔
 （`OMNIXPU_INT8_FAST_FORWARD_COPY_MIN_ELEMS`，默认 16 Mi 元素，约
 32 MiB bf16），VAE 小 Linear 回退原路径；权重已在 XPU 时不受限。
 
+info19（阈值生效）：H3 三个 Linear 全部 `omni_dg2_compat_fast`，VAE
+回到原路径，总时长 301.26 s / 254.06 s（info17 为 310.96 / 257.56）。
+
+#### DG2 D64 attention 实测回归（2026-08-13）
+
+同步测出 DG2 的 ESIMD D64 kernel 远慢于 torch SDPA：
+`(1,1797,32,64) fp16` 10.57 ms vs 1.22 ms（约 8.7x）；`(1,20683,32,64)`
+1.45 s vs 0.10 s（约 14x）。该 D64 sidecar 路径继承自 Xe2 调优、未在
+A770 重新测量；VAE 阶段约 53 s/run 都耗在这里。适配器新增
+`dg2_torch_d64_fp16` 路由：DG2 + fp16 + D64 + 无 mask 直接走 torch
+SDPA（BHLD 输入零拷贝），预计 VAE 阶段省 ~45-50 s/run。D128 bf16
+主模型保持 ESIMD（385 vs 391 ms，基本持平）。
+
 本文不把 ComfyUI Portable 当作编译环境。编译环境位于项目目录内，
 Portable 只用于最终安装和运行测试，避免修改其他项目的 Python 环境。
 
