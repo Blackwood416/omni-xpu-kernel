@@ -121,7 +121,8 @@ torch::Tensor dequantize_int8_convrot_weight(
     int64_t group_size) {
     TORCH_CHECK(q.device().is_xpu(), "q must be on XPU");
     TORCH_CHECK(q.scalar_type() == torch::kInt8, "q must be int8");
-#if defined(OMNI_XPU_ARCH_PTL_H) || defined(OMNI_XPU_ARCH_BMG)
+#if defined(OMNI_XPU_ARCH_PTL_H) || defined(OMNI_XPU_ARCH_BMG) || \
+    defined(OMNI_XPU_ARCH_DG2)
     if (q.dim() == 2 && (group_size == 64 || group_size == 256) &&
         q.size(1) % group_size == 0 && scale.numel() == q.size(0)) {
         return dequantize_int8_convrot_fused(q, scale, group_size);
