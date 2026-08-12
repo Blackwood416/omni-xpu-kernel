@@ -406,6 +406,33 @@ def _can_quantize_int8_convrot_g16_bmg(
     return rows in (109, 110, 4096, 4205, 4206)
 
 
+def _can_fused_convrot_dg2(
+    x: torch.Tensor,
+    native,
+    convrot: bool,
+    convrot_groupsize: int,
+) -> bool:
+    """DG2 fast path: ESIMD rotation+quantize instead of sync torch matmul."""
+    if not convrot or convrot_groupsize not in (64, 256):
+        return False
+    if (
+        x.device.type != "xpu"
+        or x.dtype not in (torch.float16, torch.bfloat16)
+        or x.dim() < 2
+        or not x.is_contiguous()
+        or x.shape[-1] % convrot_groupsize != 0
+        or native is None
+        or not hasattr(native, "quantize_int8_convrot_fused")
+    ):
+        return False
+    try:
+        from .. import __xpu_target__
+
+        return __xpu_target__ == "dg2"
+    except (ImportError, RuntimeError):
+        return False
+
+
 def _can_pair_int8_convrot_g16_bmg(
     x: torch.Tensor,
     native,
@@ -1027,6 +1054,24 @@ def int8_linear(
                 bias,
                 dtype_code,
             )
+        if _can_fused_convrot_dg2(
+            x, native, convrot, convrot_groupsize
+        ):
+            original_sizes = list(x.shape)
+            x2d = x.reshape(-1, x.shape[-1]).contiguous()
+            x_int8, x_scale = native.quantize_int8_convrot_fused(
+                x2d, convrot_groupsize
+            )
+            output = native.int8_linear_prequantized(
+                x_int8,
+                x_scale,
+                weight,
+                weight_scale,
+                bias,
+                dtype_code,
+            )
+            output_sizes = list(original_sizes[:-1]) + [weight.shape[0]]
+            return output.reshape(output_sizes)
         # Rotate through the native cached Hadamard-matrix implementation.
         if convrot:
             if x.shape[-1] % convrot_groupsize != 0:
