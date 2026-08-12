@@ -412,8 +412,16 @@ def _can_fused_convrot_dg2(
     convrot: bool,
     convrot_groupsize: int,
 ) -> bool:
-    """DG2 fast path: ESIMD rotation+quantize instead of sync torch matmul."""
+    """DG2 long-sequence fast path: ESIMD rotation+quantize.
+
+    The DG2 fused kernel uses one work-item per row (WG=1). On small row
+    counts it is slower than the composed torch-matmul path, so keep it for
+    the H3 phase-0 shapes (M >= 8192) where it removes the post-SDP host
+    stall without regressing the shorter VAE/phase-1 contracts.
+    """
     if not convrot or convrot_groupsize not in (64, 256):
+        return False
+    if x.dim() < 2 or x.numel() // x.shape[-1] < 8192:
         return False
     if (
         x.device.type != "xpu"
