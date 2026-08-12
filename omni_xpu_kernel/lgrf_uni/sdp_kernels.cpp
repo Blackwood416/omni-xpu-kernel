@@ -70,6 +70,20 @@ namespace dg2 {
     uint32_t hKv    = (uint32_t)headKv;
 
 // ──────────────────────────────────────────────────────────────────────────────
+// sdp_clear_cache: release sidecar-owned packed Q/K/V USM buffers.
+// ComfyUI's unload_all_models/empty_cache cannot see these allocations, so a
+// VRAM Debug-style node should call this before a new workflow run.
+// ──────────────────────────────────────────────────────────────────────────────
+extern "C" ESIMD_KERNEL_API void sdp_clear_cache(void* sycl_queue_ptr) {
+#if defined(OMNI_XPU_ARCH_DG2)
+    sycl::queue& q = *reinterpret_cast<sycl::queue*>(sycl_queue_ptr);
+    dg2v4::clearV4Cache(q);
+#else
+    (void)sycl_queue_ptr;
+#endif
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // sdp_fp16: FP16 optimized Flash Attention
 // ──────────────────────────────────────────────────────────────────────────────
 extern "C" ESIMD_KERNEL_API void sdp_fp16(

@@ -773,6 +773,19 @@ inline std::mutex& v4_mutex() {
   return m;
 }
 
+inline void clearV4Cache(sycl::queue& queue) {
+  std::lock_guard<std::mutex> guard(v4_mutex());
+  // Sidecar kernels are async; never free USM an in-flight kernel may read.
+  queue.wait();
+  for (auto& entry : v4_cache()) {
+    sycl::free(entry.second.packedQ, queue);
+    sycl::free(entry.second.packedK, queue);
+    sycl::free(entry.second.packedV, queue);
+  }
+  v4_cache().clear();
+  v4_lru_order().clear();
+}
+
 template <typename ElemT>
 inline void runSdpV4(
     const void* q,

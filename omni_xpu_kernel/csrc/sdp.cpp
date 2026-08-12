@@ -56,6 +56,8 @@ using sdp_kernel_fn = void (*)(
     int headKv,
     void* sycl_queue_ptr);
 
+using sdp_clear_fn = void (*)(void* sycl_queue_ptr);
+
 struct KernelLibrary {
 #ifdef _WIN32
     HMODULE handle{nullptr};
@@ -67,6 +69,7 @@ struct KernelLibrary {
     sdp_kernel_fn fp16_fast{nullptr};   // no-clamp variant for small V
     sdp_kernel_fn fp16_hd64{nullptr};
     sdp_kernel_fn bf16io_hd64{nullptr};
+    sdp_clear_fn clear{nullptr};
 };
 
 KernelLibrary& get_kernel_library() {
@@ -133,6 +136,7 @@ KernelLibrary& get_kernel_library() {
         library.fp16_fast = reinterpret_cast<sdp_kernel_fn>(GetProcAddress(library.handle, "sdp_fp16_fast"));
         library.fp16_hd64 = reinterpret_cast<sdp_kernel_fn>(GetProcAddress(library.handle, "sdp_fp16_hd64"));
         library.bf16io_hd64 = reinterpret_cast<sdp_kernel_fn>(GetProcAddress(library.handle, "sdp_bf16io_hd64"));
+        library.clear = reinterpret_cast<sdp_clear_fn>(GetProcAddress(library.handle, "sdp_clear_cache"));
 #else
         Dl_info current_module_info;
         if (dladdr(reinterpret_cast<void*>(&get_kernel_library), &current_module_info) == 0 || current_module_info.dli_fname == nullptr) {
@@ -173,6 +177,7 @@ KernelLibrary& get_kernel_library() {
         library.fp16_fast = reinterpret_cast<sdp_kernel_fn>(dlsym(library.handle, "sdp_fp16_fast"));
         library.fp16_hd64 = reinterpret_cast<sdp_kernel_fn>(dlsym(library.handle, "sdp_fp16_hd64"));
         library.bf16io_hd64 = reinterpret_cast<sdp_kernel_fn>(dlsym(library.handle, "sdp_bf16io_hd64"));
+        library.clear = reinterpret_cast<sdp_clear_fn>(dlsym(library.handle, "sdp_clear_cache"));
 #endif
 
         if (library.fp16 == nullptr || library.bf16io == nullptr) {
@@ -416,6 +421,15 @@ torch::Tensor sdp(torch::Tensor q, torch::Tensor k, torch::Tensor v) {
     }
 
     return out;
+}
+
+void clear_cache() {
+    auto& kernels = get_kernel_library();
+    if (kernels.clear == nullptr) {
+        return;
+    }
+    sycl::queue& queue = utils::get_queue(torch::Device(torch::kXPU, 0));
+    kernels.clear(&queue);
 }
 
 } // namespace sdp

@@ -44,4 +44,16 @@ def sdp(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     return _get_native().sdp(q, k, v)
 
 
-__all__ = ["sdp", "is_available"]
+def clear_cache() -> None:
+    """Release sidecar-owned packed Q/K/V USM buffers.
+
+    ComfyUI's ``unload_all_models`` / ``torch.xpu.empty_cache`` cannot see
+    these allocations. Call this before starting a new workflow run when
+    VRAM pressure is observed.
+    """
+    if not _sidecar_candidates_cached():
+        return
+    _get_native().clear_cache()
+
+
+__all__ = ["sdp", "is_available", "clear_cache"]

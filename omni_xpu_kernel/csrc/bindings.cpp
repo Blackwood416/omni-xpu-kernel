@@ -84,6 +84,7 @@ namespace rotary {
 }
 namespace sdp {
     torch::Tensor sdp(torch::Tensor q, torch::Tensor k, torch::Tensor v);
+    void clear_cache();
 }
 namespace linear {
     torch::Tensor onednn_w8a16_fp8(torch::Tensor input, torch::Tensor weight, torch::Tensor scale_w, std::optional<torch::Tensor> bias);
@@ -515,6 +516,10 @@ PYBIND11_MODULE(_C, m) {
         "Returns: (output, has_nonfinite) where has_nonfinite is True if kernel\n"
         "detected inf/nan (e.g. degenerate softmax), signaling SDPA fallback needed.",
         py::arg("q"), py::arg("k"), py::arg("v"));
+    sdp.def("clear_cache", &omni_xpu::sdp::clear_cache,
+        "Release sidecar-owned packed Q/K/V USM buffers. ComfyUI model "
+        "management cannot free these; call before starting a new workflow "
+        "run when VRAM pressure is observed.");
 
     // INT8 Quantization and Linear (oneDNN s8 matmul)
     auto int8 = m.def_submodule("int8", "INT8 quantization and linear kernels");
