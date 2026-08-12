@@ -138,6 +138,13 @@ XPU 时先 `.to(device)` 再跑同一个 omni kernel（与原路径每调用搬�
 相同，但跳过 from_float/dequant/dispatch）。设
 `OMNIXPU_INT8_FAST_FORWARD_COPY=0` 恢复严格 device 条件。
 
+info18（copy=on）A/B：H3 主模型阶段约快 10 s（attention 间隔
+0.746→0.694 s），但 VAE 明显变慢（int8_linear 链间隔 22→40 ms）：VAE
+权重在 CPU，每次调用多一次 H2D 拷贝（4-33 MiB），而 VAE kernel 只有
+1-3 ms，拷贝开销反而占主导。修复：拷贝兜底只在大激活时启用
+（`OMNIXPU_INT8_FAST_FORWARD_COPY_MIN_ELEMS`，默认 16 Mi 元素，约
+32 MiB bf16），VAE 小 Linear 回退原路径；权重已在 XPU 时不受限。
+
 本文不把 ComfyUI Portable 当作编译环境。编译环境位于项目目录内，
 Portable 只用于最终安装和运行测试，避免修改其他项目的 Python 环境。
 
