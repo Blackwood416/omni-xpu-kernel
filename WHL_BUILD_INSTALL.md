@@ -164,6 +164,16 @@ qdata/scale 副本（LRU，上限 12），消除重复拷贝；权重原地变�
 LoRA 路径（weight_function 非空）本就不走快路径。可用
 `OMNIXPU_INT8_QDATA_CACHE=0` 关闭 A/B。
 
+info21（qdata cache 默认开）：首跑 254 s / 217 s，与 info20 基本持平；
+逐事件时间线显示每 block ~840 ms，其中 GPU 计算下限约 537 ms
+（standalone 真实权重全 block 流水线实测），剩余 ~240 ms/block 是
+ComfyUI host/VRAM 开销（vbar cast、run_every_op、rope/qnorm、日志等），
+不是 kernel。fc2 原本仍走 `linear_input_act` 的 cast_bias_weight +
+registry int8（每 block 重复 77 MiB 拷贝 + vbar page-in），现也纳入
+快路径：`comfy.ops.linear_input_act` 被补丁接管，TensorWise INT8 +
+swiglu + 大激活时直接走 cached-qdata omni kernel
+（debug 标记 `omni_dg2_compat_fast_fc2`）。
+
 #### DG2 D64 attention 实测回归（2026-08-13）
 
 同步测出 DG2 的 ESIMD D64 kernel 远慢于 torch SDPA：
