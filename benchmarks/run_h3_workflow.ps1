@@ -5,7 +5,8 @@ param(
     [string]$LogPrefix = "comfy-auto",
     [switch]$KeepAlive,
     [switch]$SkipRun,
-    [switch]$Verbose
+    [switch]$Verbose,
+    [switch]$NoManager
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,15 +24,17 @@ $env:OMNIXPU_ENABLE = "1"
 $env:OMNIXPU_ATTENTION = "1"
 $env:COMFYUI_GGUF_BACKEND = "xpu"
 $env:OMNIXPU_DEBUG_VERBOSE = if ($Verbose) { "1" } else { "0" }
+$env:PYTHONIOENCODING = "utf-8"
 
 $logFile = Join-Path $root "$LogPrefix.log"
 $outFile = Join-Path $root "$LogPrefix.stdout.txt"
 $errFile = Join-Path $root "$LogPrefix.stderr.txt"
 Remove-Item $logFile, $outFile, $errFile -ErrorAction SilentlyContinue
 
-$args = @("-s", "ComfyUI\main.py", "--windows-standalone-build",
-          "--enable-manager", "--enable-dynamic-vram",
-          "--verbose", "INFO", ".\$LogPrefix.log", "--port", "$Port")
+$managerArg = if ($NoManager) { @() } else { @("--enable-manager") }
+$args = @("-s", "ComfyUI\main.py", "--windows-standalone-build") + $managerArg +
+        @("--enable-dynamic-vram", "--verbose", "INFO", ".\$LogPrefix.log",
+          "--port", "$Port")
 Write-Host "Starting ComfyUI on port $Port ..."
 $proc = Start-Process -FilePath $python -ArgumentList $args -WorkingDirectory $root `
     -WindowStyle Hidden -RedirectStandardOutput $outFile -RedirectStandardError $errFile -PassThru

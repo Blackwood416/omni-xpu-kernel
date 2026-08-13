@@ -152,6 +152,26 @@ info20（PR #4 + 新版 ComfyUI + D64→torch）：255.02 s / 220.79 s，无
 DEVICE_LOST。VAE attention 全部 `dg2_torch_d64_fp16`；H3 主模型
 int8 全部 `omni_dg2_compat_fast`。
 
+#### 工作流级 profiling 结论（2026-08-13，headless 复现 224.6/190.5 s）
+
+自跑链路：`benchmarks/run_h3_workflow.ps1`（comfy-cli + 种子随机化，
+可 `-Verbose` / `-NoManager`）、`benchmarks/profile_h3_workflow.ps1`
+（py-spy 采样）、`benchmarks/vtune_h3_workflow.ps1`（VTune + 工作流）。
+
+- VTune gpu-hotspots：attention kernel 81.4 s、oneDNN GEMM 12.8 s、
+  其他 42.5 s；GPU 占用 75.9%。H2D 传输 151.8 GB 主要来自 VAE 逐 tile
+  的权重搬运（约 3780 tile × 4 Linear），不是 H3。
+- py-spy：`_int8_qdata_cached` 的高采样是首轮 200 个模块一次性 H2D
+  拷贝（这也解释了第二次运行快 ~20 s）；真正的 host 时间分散在 torch
+  dispatch（~38%）、cast_bias_weight 机制、asyncio/manager，没有单一
+  可下手热点。
+- A/B 均无收益并回退/未采用：VAE 小 Linear 快路径（首跑 297 s）、
+  norm cast 绕过（权重在 CPU 时不生效）、norm 参数缓存、关 manager、
+  wrapper→native 直连。qdata 缓存本身确认无 churn、命中正常。
+- 每 block ~680 ms vs standalone GPU 下限 ~537 ms，剩余 ~140 ms 是
+  ComfyUI/torch 调度与同步间隙，属架构固有；attention kernel 366 ms
+  已贴峰值。当前实际可用成绩：首跑 ~214-225 s、第二次 ~182-192 s。
+
 #### VTune：H3 attention 已贴峰值（2026-08-13）
 
 `benchmarks/dg2v4_h3_vtune_driver.cpp`（bf16、L=KV=20683、H=56、D=128，
