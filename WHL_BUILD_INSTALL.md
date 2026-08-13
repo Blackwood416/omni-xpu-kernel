@@ -148,6 +148,22 @@ info18（copy=on）A/B：H3 主模型阶段约快 10 s（attention 间隔
 info19（阈值生效）：H3 三个 Linear 全部 `omni_dg2_compat_fast`，VAE
 回到原路径，总时长 301.26 s / 254.06 s（info17 为 310.96 / 257.56）。
 
+info20（PR #4 + 新版 ComfyUI + D64→torch）：255.02 s / 220.79 s，无
+DEVICE_LOST。VAE attention 全部 `dg2_torch_d64_fp16`；H3 主模型
+int8 全部 `omni_dg2_compat_fast`。
+
+#### VTune：H3 attention 已贴峰值（2026-08-13）
+
+`benchmarks/dg2v4_h3_vtune_driver.cpp`（bf16、L=KV=20683、H=56、D=128，
+直接调 sidecar `sdp_bf16io`）实测纯 kernel 366 ms（约 33.5 TFLOPS）；
+VTune gpu-hotspots 显示 attn 占 99.4% GPU 指令、packK 0.5%、packQ 0.08%。
+kernel 侧没有可挖空间。工作流内每 block ~0.7-0.8 s 的剩余来自 host 侧：
+每个 block 重复 H2D 拷贝 qkv/out/fc1/fc2 的 qdata（约 386 MiB）。
+`OMNIXPU_INT8_QDATA_CACHE=1`（默认开）按模块身份+存储身份缓存 XPU
+qdata/scale 副本（LRU，上限 12），消除重复拷贝；权重原地变更会失效，
+LoRA 路径（weight_function 非空）本就不走快路径。可用
+`OMNIXPU_INT8_QDATA_CACHE=0` 关闭 A/B。
+
 #### DG2 D64 attention 实测回归（2026-08-13）
 
 同步测出 DG2 的 ESIMD D64 kernel 远慢于 torch SDPA：
