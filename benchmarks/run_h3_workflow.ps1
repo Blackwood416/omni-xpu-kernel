@@ -52,7 +52,23 @@ try {
 
     for ($run = 1; $run -le $Runs; $run++) {
         Write-Host "=== run $run/$Runs ==="
-        & $comfy run --workflow $Workflow --wait --port $Port --no-notify
+        # GUI queues randomize the RandomNoise seed, which is what makes a
+        # second queue of the same workflow re-execute. Mimic that here so a
+        # repeated run is not fully node-cached.
+        $runWf = $Workflow
+        try {
+            $json = Get-Content $Workflow -Raw | ConvertFrom-Json
+            $noise = $json.nodes | Where-Object { $_.type -eq "RandomNoise" } | Select-Object -First 1
+            if ($noise -and $noise.widgets_values.Count -gt 0) {
+                $noise.widgets_values[0] = Get-Random -Minimum 1000000000000 -Maximum 9999999999999
+                $runWf = Join-Path $env:TEMP "h3_workflow_run_$run.json"
+                $text = $json | ConvertTo-Json -Depth 100
+                [System.IO.File]::WriteAllText($runWf, $text, (New-Object System.Text.UTF8Encoding($false)))
+            }
+        } catch {
+            Write-Warning "seed randomization failed, using saved workflow as-is: $_"
+        }
+        & $comfy run --workflow $runWf --wait --port $Port --no-notify
         if ($LASTEXITCODE -ne 0) { throw "comfy run failed with exit code $LASTEXITCODE" }
         $m = Select-String -Path $logFile -Pattern "Prompt executed in ([\d\.]+) seconds" | Select-Object -Last 1
         if ($m) { Write-Host ("run {0} completed: {1} seconds" -f $run, $m.Matches[0].Groups[1].Value) }
