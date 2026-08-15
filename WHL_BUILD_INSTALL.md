@@ -72,6 +72,26 @@ DG2 原生 ESIMD kernel（`flash.attn.b.mha.dg2.h`），A770 上需显式设置
 
 #### H3 INT8 长序列 offload 诊断（2026-08-12）
 
+#### DG2 ConvRot 融合状态（2026-08-15）
+
+`int8_convrot_quant_dg2.cpp` 实现了 radix-4 SLM 蝶形变换替代
+`rotate_convrot` 的缓存 Hadamard matmul，并融合 rowwise INT8 量化：
+
+- 单 kernel 行驻留 SLM 版本（WG=256，K<=14336）：数值正确（~94% 与
+  matmul 路径逐元素一致，其余相差 1 个 INT8 LSB），但 1 WG/行 + 57KB SLM
+  占用过低，实测 0.39-0.78x，比现有 rotate+quantize 组合慢，未采用。
+- 两阶段原子 row-max 版本：触发 `UR_RESULT_ERROR_DEVICE_LOST`（第二个
+  H3 形状即失效）。
+- 三 kernel 无原子版本（rotate+group-max → 行归约 → rotate+quantize）：
+  同样触发 `UR_RESULT_ERROR_DEVICE_LOST`。
+- 结论：A770/驱动 32.0.101.8860 上继续使用现有
+  `rotate_convrot`(matmul) + `quantize_int8_rowwise_fused` 组合；
+  融合 kernel 保留为 `OMNIXPU_DG2_CONVROT_FUSED=1` 的 opt-in 实验
+  （默认关闭），等待驱动/编译器升级后复测。负面结果保留在
+  `tests/test_int8_convrot_fused_dg2.py` 与 kernel 文件注释中。
+
+#### H3 INT8 长序列 offload 诊断（2026-08-12）
+
 `comfy-info8.log` 的两次完整 workflow（int8_convrot 权重、内置 UNet
 Loader）单次约 559-569 s。前 200 个 `seq=20683/head=56/D=128` block 占
 约 440 s；后续 3780 个 `seq=1797/head=32/D=64` block 仅约 90-100 s。

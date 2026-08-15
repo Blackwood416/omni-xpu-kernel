@@ -87,6 +87,7 @@ def _apply_input_act(
 _h3_swiglu_trace_logged = False
 _h3_low_peak_trace_logged = False
 _h3_low_peak_convrot_trace_logged = False
+_dg2_convrot_fused_trace_logged = False
 
 # The failing 720-class/15s allocation is a single 2.671 GiB BF16 H3 SwiGLU
 # output.  Keep established shorter sequences on the faster whole-tensor route
@@ -144,6 +145,68 @@ def _can_fuse_h3_swiglu(
         and weight.ndim == 2
         and weight.shape[1] == x.shape[1] // 2
     )
+
+
+def _can_use_dg2_convrot_fused(
+    x: torch.Tensor,
+    native,
+    convrot: bool,
+    convrot_groupsize: int,
+) -> bool:
+    """Return whether the DG2 fused ConvRot+quantize route applies.
+
+    The A770 wheel exposes ``quantize_int8_convrot_fused_dg2``: a radix-4
+    SLM butterfly fused with rowwise INT8 quantization (K <= 14336). It is
+    target-gated to DG2 until the same kernel is measured on other GPUs.
+    """
+    if (
+        native is None
+        or not hasattr(native, "quantize_int8_convrot_fused_dg2")
+        or not convrot
+        or convrot_groupsize not in (64, 256)
+        or not isinstance(x, torch.Tensor)
+        or x.device.type != "xpu"
+        or x.dtype not in (torch.bfloat16, torch.float16)
+        or x.ndim != 2
+        or x.shape[0] <= 0
+        or x.shape[1] <= 0
+        or x.shape[1] > 16384
+        or x.shape[1] % convrot_groupsize != 0
+        or not x.is_contiguous()
+        or x.requires_grad
+    ):
+        return False
+    try:
+        from .. import __xpu_target__
+
+        if __xpu_target__ != "dg2":
+            return False
+    except (ImportError, RuntimeError):
+        return False
+    # Keep the fused route opt-in while it is being validated on A770.
+    return os.environ.get("OMNIXPU_DG2_CONVROT_FUSED", "0") == "1"
+
+
+def _apply_dg2_convrot_fused(
+    x: torch.Tensor,
+    native,
+    convrot_groupsize: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run the fused DG2 ConvRot+quantize path and log its first use."""
+    global _dg2_convrot_fused_trace_logged
+
+    result = native.quantize_int8_convrot_fused_dg2(x, convrot_groupsize)
+    if (
+        not _dg2_convrot_fused_trace_logged
+        and os.environ.get("OMNIXPU_H3_SWIGLU_TRACE") == "1"
+    ):
+        print(
+            "[OmniXPU] DG2 fused ConvRot+quantize route: "
+            f"input={tuple(x.shape)} group={convrot_groupsize}",
+            flush=True,
+        )
+        _dg2_convrot_fused_trace_logged = True
+    return result
 
 
 def _apply_h3_swiglu_exact(x: torch.Tensor, native) -> torch.Tensor:
@@ -230,8 +293,15 @@ def _stream_h3_swiglu_int8_linear(
         chunk = x[start:stop]
         gate, up = chunk.chunk(2, dim=-1)
         activated = native.fused_silu_mul_exact_bf16(gate, up)
-        rotated = native.rotate_convrot(activated, 256)
-        x_int8, x_scale = native.quantize_int8_rowwise_fused(rotated)
+        if _can_use_dg2_convrot_fused(
+            activated, native, True, 256
+        ):
+            x_int8, x_scale = _apply_dg2_convrot_fused(
+                activated, native, 256
+            )
+        else:
+            rotated = native.rotate_convrot(activated, 256)
+            x_int8, x_scale = native.quantize_int8_rowwise_fused(rotated)
         output_chunk = output[start:stop]
         native.int8_linear_prequantized_out(
             x_int8,
@@ -244,16 +314,7 @@ def _stream_h3_swiglu_int8_linear(
         )
         # Do not retain the previous chunk while launching the next producer.
         # PyTorch's XPU allocator records stream use before recycling storage.
-        del (
-            output_chunk,
-            x_scale,
-            x_int8,
-            rotated,
-            activated,
-            up,
-            gate,
-            chunk,
-        )
+        del output_chunk, x_scale, x_int8, activated, up, gate, chunk
 
     if (
         not _h3_low_peak_trace_logged
@@ -328,8 +389,11 @@ def _stream_h3_convrot_int8_linear(
     for start in range(0, rows, chunk_rows):
         stop = min(start + chunk_rows, rows)
         chunk = x[start:stop]
-        rotated = native.rotate_convrot(chunk, 256)
-        x_int8, x_scale = native.quantize_int8_rowwise_fused(rotated)
+        if _can_use_dg2_convrot_fused(chunk, native, True, 256):
+            x_int8, x_scale = _apply_dg2_convrot_fused(chunk, native, 256)
+        else:
+            rotated = native.rotate_convrot(chunk, 256)
+            x_int8, x_scale = native.quantize_int8_rowwise_fused(rotated)
         output_chunk = output[start:stop]
         native.int8_linear_prequantized_out(
             x_int8,
@@ -340,7 +404,7 @@ def _stream_h3_convrot_int8_linear(
             dtype_code,
             output_chunk,
         )
-        del output_chunk, x_scale, x_int8, rotated, chunk
+        del output_chunk, x_scale, x_int8, chunk
 
     if (
         not _h3_low_peak_convrot_trace_logged
@@ -1027,6 +1091,20 @@ def int8_linear(
                 bias,
                 dtype_code,
             )
+        if _can_use_dg2_convrot_fused(
+            x, native, convrot, convrot_groupsize
+        ):
+            x_int8, x_scale = _apply_dg2_convrot_fused(
+                x, native, convrot_groupsize
+            )
+            return native.int8_linear_prequantized(
+                x_int8,
+                x_scale,
+                weight,
+                weight_scale,
+                bias,
+                dtype_code,
+            )
         # Rotate through the native cached Hadamard-matrix implementation.
         if convrot:
             if x.shape[-1] % convrot_groupsize != 0:
@@ -1226,6 +1304,28 @@ def rotate_convrot(
     return _rotate_activation(x, h, group_size)
 
 
+def quantize_int8_convrot_fused(
+    x: torch.Tensor,
+    group_size: int = 256,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Fuse ConvRot rotation with rowwise INT8 quantization (DG2/A770).
+
+    The native DG2 route replaces the cached Hadamard matmul with a radix-4
+    SLM butterfly and never materializes the floating rotated activation.
+    Supported contracts: XPU, 2D bf16/f16, K <= 14336, group 64/256.
+    Other inputs raise ``RuntimeError``; callers keep the rotate+quantize
+    fallback.
+    """
+    native = _get_native()
+    if native is not None and hasattr(
+        native, "quantize_int8_convrot_fused_dg2"
+    ):
+        return native.quantize_int8_convrot_fused_dg2(x, group_size)
+    raise RuntimeError(
+        "DG2 fused ConvRot quantization is unavailable in this build"
+    )
+
+
 def quantize_int8_convrot_weight(
     weight: torch.Tensor,
     group_size: int = 256,
@@ -1306,6 +1406,7 @@ __all__ = [
     "int8_linear_prequantized",
     "int8_linear_shared_input",
     "rotate_convrot",
+    "quantize_int8_convrot_fused",
     "quantize_int8_convrot_weight",
     "dequantize_int8_convrot_weight",
     "int8_cache_clear",

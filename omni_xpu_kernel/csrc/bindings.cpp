@@ -131,6 +131,8 @@ namespace int8_ops {
     std::tuple<torch::Tensor, torch::Tensor> quantize_int8_convrot_g16_bmg(
         torch::Tensor input);
 #endif
+    std::tuple<torch::Tensor, torch::Tensor> quantize_int8_convrot_fused_dg2(
+        torch::Tensor input, int64_t group_size);
     torch::Tensor fused_silu_mul(torch::Tensor x1, torch::Tensor x2);
     torch::Tensor fused_silu_mul_exact_bf16(
         torch::Tensor gate, torch::Tensor up);
@@ -627,6 +629,12 @@ PYBIND11_MODULE(_C, m) {
         py::arg("input"));
     int8.def("rotate_convrot", &omni_xpu::int8_ops::rotate_convrot,
         "Regular Hadamard rotation using a cached matrix multiplication on the last dimension",
+        py::arg("input"), py::arg("group_size") = 256);
+    int8.def(
+        "quantize_int8_convrot_fused_dg2",
+        &omni_xpu::int8_ops::quantize_int8_convrot_fused_dg2,
+        "DG2 fused ConvRot activation rotation + rowwise INT8 quantization "
+        "(radix-4 SLM butterfly, K <= 14336, group sizes 64/256)",
         py::arg("input"), py::arg("group_size") = 256);
     int8.def("quantize_int8_convrot_weight", &omni_xpu::int8_ops::quantize_int8_convrot_weight,
         "Native ConvRot weight rotation followed by row-wise INT8 quantization",
