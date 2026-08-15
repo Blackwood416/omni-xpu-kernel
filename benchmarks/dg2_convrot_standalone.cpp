@@ -1,4 +1,4 @@
-// Standalone A770 ConvRot butterfly harness (no torch/pybind).
+// Standalone A770 ConvRot fused-kernel configuration sweep.
 //
 // Compile:
 //   icpx -fsycl -fsycl-targets=spir64_gen -Xs "-device dg2" -O2 \
@@ -6,6 +6,7 @@
 
 #include <sycl/sycl.hpp>
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -13,19 +14,16 @@
 
 using bf16 = sycl::ext::oneapi::bfloat16;
 
-constexpr int32_t SG = 32;
-constexpr int32_t WG = 256;
-constexpr int32_t SUBS = WG / SG;
-
-void rotate_quantize_kernel(
+template <int WG, int SG>
+void rotate_max_kernel(
     const bf16* __restrict__ input,
-    int8_t* __restrict__ output,
+    float* __restrict__ group_maxes,
     int64_t rows,
     int64_t groups,
     int64_t group_size,
-    float inv_sqrt_group,
-    float scale,
+    int64_t stages,
     sycl::queue& queue) {
+    constexpr int SUBS = WG / SG;
     const int64_t groups_per_wg = SUBS;
     const int64_t wgs = (groups + groups_per_wg - 1) / groups_per_wg;
     const size_t global = static_cast<size_t>(rows) * wgs * WG;
@@ -54,7 +52,8 @@ void rotate_quantize_kernel(
                     input + row * groups * group_size;
 
                 auto rotate_group = [&]() {
-                    constexpr int VEC = 8;
+                    // group_size is fixed at 256 in this sweep.
+                    constexpr int VEC = 256 / SG;
                     const int64_t lane_start =
                         static_cast<int64_t>(lane) * VEC;
                     if (group_size % VEC == 0) {
@@ -77,10 +76,9 @@ void rotate_quantize_kernel(
                     }
                     item.barrier(sycl::access::fence_space::local_space);
 
-                    // Compile-time unrolled radix-4 butterfly (G=256).
-                    const int64_t strides[4] = {1, 4, 16, 64};
-                    for (int64_t stage = 0; stage < 4; ++stage) {
-                        const int64_t stride = strides[stage];
+                    for (int64_t stage = 0; stage < stages; ++stage) {
+                        const int64_t stride =
+                            static_cast<int64_t>(1) << (2 * stage);
                         for (int64_t r = lane; r < stride; r += SG) {
                             for (int64_t b = r; b < group_size;
                                  b += 4 * stride) {
@@ -102,31 +100,41 @@ void rotate_quantize_kernel(
                         }
                         item.barrier(sycl::access::fence_space::local_space);
                     }
-
-                    // DEBUG: round without the bf16 cast (pure float *).
-                    for (int64_t k = lane; k < group_size; k += SG) {
-                        slm[slm_offset + k] =
-                            slm[slm_offset + k] * inv_sqrt_group;
-                    }
-                    item.barrier(sycl::access::fence_space::local_space);
                 };
 
                 rotate_group();
 
-                const float quant_inv = 127.0f / scale;
-                int8_t* __restrict__ out_ptr =
-                    output + row * groups * group_size;
-                if (valid) {
-                    for (int64_t k = lane; k < group_size; k += SG) {
-                        float q = sycl::rint(
-                            slm[slm_offset + k] * quant_inv);
-                        q = sycl::fmax(-128.0f, sycl::fmin(127.0f, q));
-                        out_ptr[group_offset + k] = static_cast<int8_t>(
-                            static_cast<int32_t>(q));
-                    }
+                float local_max = 0.0f;
+                for (int64_t k = lane; k < group_size; k += SG) {
+                    local_max = sycl::fmax(
+                        local_max, sycl::fabs(slm[slm_offset + k]));
+                }
+                const float group_max = sycl::reduce_over_group(
+                    sg, local_max, sycl::maximum<float>());
+                if (lane == 0 && valid) {
+                    group_maxes[row * groups + group] = group_max;
                 }
             });
     });
+}
+
+template <int WG, int SG>
+double run_a(const bf16* in, float* scratch, int64_t rows, int64_t groups,
+             int64_t group_size, sycl::queue& queue, int iters) {
+    const int64_t stages =
+        static_cast<int64_t>(std::log(static_cast<double>(group_size)) /
+                             std::log(4.0) + 0.5);
+    for (int i = 0; i < 3; ++i)
+        rotate_max_kernel<WG, SG>(in, scratch, rows, groups, group_size,
+                                  stages, queue);
+    queue.wait();
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < iters; ++i)
+        rotate_max_kernel<WG, SG>(in, scratch, rows, groups, group_size,
+                                  stages, queue);
+    queue.wait();
+    auto t1 = std::chrono::steady_clock::now();
+    return std::chrono::duration<double, std::milli>(t1 - t0).count() / iters;
 }
 
 int main() {
@@ -135,63 +143,47 @@ int main() {
         std::printf(
             "device: %s\n",
             queue.get_device().get_info<sycl::info::device::name>().c_str());
+
         const int64_t G = 256;
-        const int64_t K = G;
-        const int64_t groups = 1;
-        const int64_t rows = 1;
-        const float inv_sqrt = 1.0f / 16.0f;
-
-        std::vector<bf16> host_in(K);
-        for (int64_t i = 0; i < K; ++i) {
-            host_in[i] = static_cast<bf16>(static_cast<float>(i) / 8.0f);
+        const int64_t rows = 4096;
+        const int64_t groups = 56;  // K = 14336
+        const int64_t K = groups * G;
+        std::vector<bf16> host_in(rows * K);
+        for (int64_t i = 0; i < rows * K; ++i) {
+            host_in[i] = static_cast<bf16>(
+                static_cast<float>((i % 256)) / 8.0f);
         }
-        std::vector<int8_t> host_out(K, -99);
+        bf16* in = sycl::malloc_device<bf16>(rows * K, queue);
+        float* scratch = sycl::malloc_device<float>(rows * groups, queue);
+        queue.memcpy(in, host_in.data(), rows * K * sizeof(bf16)).wait();
 
-        bf16* in = sycl::malloc_device<bf16>(K, queue);
-        int8_t* out = sycl::malloc_device<int8_t>(K, queue);
-        queue.memcpy(in, host_in.data(), K * sizeof(bf16)).wait();
-
-        // Correct scale for this ramp: max |rotated| = 32 -> 32/127.
-        rotate_quantize_kernel(
-            in, out, rows, groups, G, inv_sqrt, 32.0f / 127.0f, queue);
-        queue.wait();
-        queue.memcpy(host_out.data(), out, K * sizeof(int8_t)).wait();
-
-        std::printf("out[0..15]:");
-        for (int i = 0; i < 16; ++i) std::printf(" %d", host_out[i]);
-        std::printf("\n");
-
-        // CPU butterfly reference.
-        std::vector<float> raw(K);
-        for (int64_t i = 0; i < K; ++i) raw[i] = static_cast<float>(host_in[i]);
-        const int64_t strides[4] = {1, 4, 16, 64};
-        for (int64_t stage = 0; stage < 4; ++stage) {
-            const int64_t stride = strides[stage];
-            std::vector<float> next = raw;
-            for (int64_t r = 0; r < stride; ++r) {
-                for (int64_t b = r; b < K; b += 4 * stride) {
-                    const float x0 = raw[b], x1 = raw[b + stride];
-                    const float x2 = raw[b + 2 * stride],
-                                x3 = raw[b + 3 * stride];
-                    next[b] = x0 + x1 + x2 - x3;
-                    next[b + stride] = x0 + x1 - x2 + x3;
-                    next[b + 2 * stride] = x0 - x1 + x2 + x3;
-                    next[b + 3 * stride] = -x0 + x1 + x2 + x3;
-                }
-            }
-            raw.swap(next);
-        }
-        int exact = 0;
-        for (int64_t i = 0; i < K; ++i) {
-            const float rotated = raw[i] * inv_sqrt;
-            const int expected_q =
-                static_cast<int>(std::rint(rotated * 127.0f / 32.0f));
-            if (host_out[i] == expected_q) ++exact;
-        }
-        std::printf("exact %d/%lld\n", exact, static_cast<long long>(K));
+        const double read_gb = static_cast<double>(rows * K * 2) / 1e9;
+        std::printf("input %.3f GB read per kernel A call\n", read_gb);
+        std::printf("%-14s %10s %10s\n", "config", "ms/call", "GB/s");
+        const int iters = 20;
+        std::printf("%-14s %10.3f %10.1f\n", "WG256/SG32",
+                    run_a<256, 32>(in, scratch, rows, groups, G, queue, iters),
+                    read_gb / (run_a<256, 32>(in, scratch, rows, groups, G,
+                                              queue, iters) / 1e3));
+        std::printf("%-14s %10.3f %10.1f\n", "WG128/SG32",
+                    run_a<128, 32>(in, scratch, rows, groups, G, queue, iters),
+                    read_gb / (run_a<128, 32>(in, scratch, rows, groups, G,
+                                              queue, iters) / 1e3));
+        std::printf("%-14s %10.3f %10.1f\n", "WG64/SG32",
+                    run_a<64, 32>(in, scratch, rows, groups, G, queue, iters),
+                    read_gb / (run_a<64, 32>(in, scratch, rows, groups, G,
+                                             queue, iters) / 1e3));
+        std::printf("%-14s %10.3f %10.1f\n", "WG32/SG32",
+                    run_a<32, 32>(in, scratch, rows, groups, G, queue, iters),
+                    read_gb / (run_a<32, 32>(in, scratch, rows, groups, G,
+                                             queue, iters) / 1e3));
+        std::printf("%-14s %10.3f %10.1f\n", "WG256/SG16",
+                    run_a<256, 16>(in, scratch, rows, groups, G, queue, iters),
+                    read_gb / (run_a<256, 16>(in, scratch, rows, groups, G,
+                                              queue, iters) / 1e3));
 
         sycl::free(in, queue);
-        sycl::free(out, queue);
+        sycl::free(scratch, queue);
         return 0;
     } catch (const sycl::exception& e) {
         std::printf("SYCL error: %s\n", e.what());

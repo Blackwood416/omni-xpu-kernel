@@ -161,7 +161,10 @@ def _can_use_dg2_convrot_fused(
     """
     if (
         native is None
-        or not hasattr(native, "quantize_int8_convrot_fused_dg2")
+        or not (
+            hasattr(native, "quantize_int8_convrot_fused_esimd")
+            or hasattr(native, "quantize_int8_convrot_fused_dg2")
+        )
         or not convrot
         or convrot_groupsize not in (64, 256)
         or not isinstance(x, torch.Tensor)
@@ -183,8 +186,8 @@ def _can_use_dg2_convrot_fused(
             return False
     except (ImportError, RuntimeError):
         return False
-    # Keep the fused route opt-in while it is being validated on A770.
-    return os.environ.get("OMNIXPU_DG2_CONVROT_FUSED", "0") == "1"
+    # Enabled by default on A770; set =0 for a composed-path A/B.
+    return os.environ.get("OMNIXPU_DG2_CONVROT_FUSED", "1") != "0"
 
 
 def _apply_dg2_convrot_fused(
@@ -195,7 +198,14 @@ def _apply_dg2_convrot_fused(
     """Run the fused DG2 ConvRot+quantize path and log its first use."""
     global _dg2_convrot_fused_trace_logged
 
-    result = native.quantize_int8_convrot_fused_dg2(x, convrot_groupsize)
+    if hasattr(native, "quantize_int8_convrot_fused_esimd"):
+        result = native.quantize_int8_convrot_fused_esimd(
+            x, convrot_groupsize
+        )
+    else:
+        result = native.quantize_int8_convrot_fused_dg2(
+            x, convrot_groupsize
+        )
     if (
         not _dg2_convrot_fused_trace_logged
         and os.environ.get("OMNIXPU_H3_SWIGLU_TRACE") == "1"
@@ -1317,6 +1327,10 @@ def quantize_int8_convrot_fused(
     fallback.
     """
     native = _get_native()
+    if native is not None and hasattr(
+        native, "quantize_int8_convrot_fused_esimd"
+    ):
+        return native.quantize_int8_convrot_fused_esimd(x, group_size)
     if native is not None and hasattr(
         native, "quantize_int8_convrot_fused_dg2"
     ):
