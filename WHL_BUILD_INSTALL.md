@@ -77,18 +77,22 @@ DG2 原生 ESIMD kernel（`flash.attn.b.mha.dg2.h`），A770 上需显式设置
 `int8_convrot_quant_dg2.cpp` 实现了 radix-4 SLM 蝶形变换替代
 `rotate_convrot` 的缓存 Hadamard matmul，并融合 rowwise INT8 量化：
 
-- 单 kernel 行驻留 SLM 版本（WG=256，K<=14336）：数值正确（~94% 与
-  matmul 路径逐元素一致，其余相差 1 个 INT8 LSB），但 1 WG/行 + 57KB SLM
-  占用过低，实测 0.39-0.78x，比现有 rotate+quantize 组合慢，未采用。
-- 两阶段原子 row-max 版本：触发 `UR_RESULT_ERROR_DEVICE_LOST`（第二个
-  H3 形状即失效）。
-- 三 kernel 无原子版本（rotate+group-max → 行归约 → rotate+quantize）：
-  同样触发 `UR_RESULT_ERROR_DEVICE_LOST`。
-- 结论：A770/驱动 32.0.101.8860 上继续使用现有
-  `rotate_convrot`(matmul) + `quantize_int8_rowwise_fused` 组合；
-  融合 kernel 保留为 `OMNIXPU_DG2_CONVROT_FUSED=1` 的 opt-in 实验
-  （默认关闭），等待驱动/编译器升级后复测。负面结果保留在
-  `tests/test_int8_convrot_fused_dg2.py` 与 kernel 文件注释中。
+- 最终形态：三 kernel（rotate+group-max → 行归约 → rotate+quantize），
+  WG=256、每 subgroup 一个 group、无效 subgroup clamp 而非提前 return。
+- 正确性：bf16 各 H3 shape 约 92-94% 与 matmul 路径逐元素一致，其余
+  相差 ≤2 个 INT8 LSB，scale 偏差 ≤0.6%；f16 约 99%。
+- 稳定性：无 DEVICE_LOST（之前两个版本的 DEVICE_LOST 根因是无效
+  subgroup 在 barrier 前提前 return；已修复）。
+- 编译器坑：蝶形变换后紧跟的原地 bf16 round pass（读取并重写全部 SLM）
+  会被 DPC++ 折叠掉，kernel 退化为“返回原始输入”；因此 round pass 被
+  移除，`1/sqrt(G)` 折叠进 scale/quant_inv（`q=round(raw*127/row_max)`）。
+- 性能：A770 上仍比现有 `rotate_convrot`(matmul) +
+  `quantize_int8_rowwise_fused` 慢（20685x14336：fused ~17.3ms vs
+  ~7.3ms），主要是 SLM barrier kernel 在 DG2 上的带宽远低于 matmul 路径。
+- 结论：保持 `OMNIXPU_DG2_CONVROT_FUSED=1` opt-in（默认关闭）；后续可
+  尝试寄存器/ESIMD 蝶形或驱动升级后复测。负面结果与独立复现保留在
+  `benchmarks/dg2_convrot_standalone.cpp`、`tests/test_int8_convrot_fused_dg2.py`
+  与 kernel 文件注释中。
 
 #### H3 INT8 长序列 offload 诊断（2026-08-12）
 

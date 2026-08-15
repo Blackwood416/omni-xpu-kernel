@@ -62,7 +62,9 @@ def _check_case(m, k, group_size, dtype, seed):
         f"exact={exact * 100:.5f}% max_qdiff={diff.max().item()} max_srel={s_rel:.2e}",
         flush=True,
     )
-    assert diff.max().item() <= 1, f"q differs by {diff.max().item()} at {m}x{k}"
+    # Skipping the composed path's bf16 rotation materialization can move a
+    # rare element by up to 2 INT8 LSB; the vast majority stay bit-identical.
+    assert diff.max().item() <= 2, f"q differs by {diff.max().item()} at {m}x{k}"
     # The fused butterfly and torch's bf16 matmul round to the same bf16
     # rotated values in nearly all positions; a different fp32 reduction
     # order can flip the last bf16 bit on a few percent of elements, which
