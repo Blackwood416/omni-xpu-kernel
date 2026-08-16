@@ -74,11 +74,14 @@ def get_xpu_target_tag(xpu_target):
     return normalize_xpu_target(xpu_target).replace("-", "")
 
 
+_VERSION_LOCAL_RE = re.compile(
+    r"\+torch\d+\.(bmg|ptlh|dg2)(?:\.(\d+))?$", re.IGNORECASE
+)
+
+
 def get_xpu_target_from_package_version(package_version):
     """Recover the AOT target from a Torch- and GPU-tagged wheel version."""
-    match = re.search(
-        r"\+torch\d+\.(bmg|ptlh|dg2)$", str(package_version), re.IGNORECASE
-    )
+    match = _VERSION_LOCAL_RE.search(str(package_version))
     if not match:
         raise RuntimeError(
             "omni_xpu_kernel wheel version has no supported GPU target tag: "
@@ -88,13 +91,56 @@ def get_xpu_target_from_package_version(package_version):
     return "ptl-h" if target_tag == "ptlh" else target_tag
 
 
-def get_package_version(torch_version, xpu_target=None):
+def get_build_counter_from_package_version(package_version):
+    """Recover the optional private rebuild counter from a wheel version.
+
+    Returns ``None`` for the canonical version and the integer for a private
+    re-release of the same base version (for example ``0.2.0b1+torch213.dg2.1``
+    returns ``1``).
+    """
+    match = _VERSION_LOCAL_RE.search(str(package_version))
+    if not match:
+        raise RuntimeError(
+            "omni_xpu_kernel wheel version has no supported GPU target tag: "
+            f"{package_version}"
+        )
+    return int(match.group(2)) if match.group(2) else None
+
+
+def get_build_counter():
+    """Optional private rebuild counter for the same base version.
+
+    Source builds append the counter to the PEP 440 local version when the
+    ``OMNI_XPU_BUILD_NUMBER`` environment variable is set. The public base
+    version stays tied to the upstream image while a re-release of the same
+    base still gets a distinguishable wheel version, e.g. set ``1`` to build
+    ``0.2.0b1+torch213.dg2.1``. Unset builds keep the canonical version.
+    """
+    raw = os.environ.get("OMNI_XPU_BUILD_NUMBER", "").strip()
+    if not raw:
+        return None
+    try:
+        counter = int(raw)
+    except ValueError as error:
+        raise RuntimeError(
+            f"Invalid OMNI_XPU_BUILD_NUMBER {raw!r}; must be a positive integer"
+        ) from error
+    if counter < 1:
+        raise RuntimeError(
+            "OMNI_XPU_BUILD_NUMBER must be a positive integer (or unset)"
+        )
+    return counter
+
+
+def get_package_version(torch_version, xpu_target=None, build_counter=None):
     """Return the native wheel version for the selected Torch ABI and GPU."""
     target = get_build_xpu_target() if xpu_target is None else normalize_xpu_target(xpu_target)
-    return (
-        f"{__base_version__}+{get_torch_tag(torch_version)}."
-        f"{get_xpu_target_tag(target)}"
-    )
+    local = f"{get_torch_tag(torch_version)}.{get_xpu_target_tag(target)}"
+    if build_counter is None:
+        build_counter = get_build_counter()
+    if build_counter is not None:
+        local = f"{local}.{build_counter}"
+    return f"{__base_version__}+{local}"
 
 
 def get_installed_torch_version():
@@ -149,7 +195,10 @@ def get_packaged_build_info(version_file=None):
     package_version = str(package_distribution.version)
     torch_version = get_required_torch_version(package_distribution.requires)
     xpu_target = get_xpu_target_from_package_version(package_version)
-    expected_version = get_package_version(torch_version, xpu_target)
+    build_counter = get_build_counter_from_package_version(package_version)
+    expected_version = get_package_version(
+        torch_version, xpu_target, build_counter=build_counter
+    )
     if package_version != expected_version:
         raise RuntimeError(
             "omni_xpu_kernel wheel metadata is inconsistent: "

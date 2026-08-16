@@ -5,7 +5,16 @@ Notable user-facing changes will be recorded here when a public
 
 ## Unreleased
 
-No public release has been published.
+## 0.2.0b1+torch213.dg2.1 - 2026-08-16
+
+- Add the A770/DG2 D64 DPAS attention port (attention v4.1, fp16 and bf16
+  D64 kernels) and the DG2 fused ConvRot rotation+quantize path via ESIMD
+  register butterfly, including stability and compiler-fold fixes.
+- Add the A770 MiniMax H3 fused RMS-RoPE bridge kernels and the matching
+  A/B benchmark and VLINT profiles.
+- Add an optional private rebuild counter to the wheel version
+  (`OMNI_XPU_BUILD_NUMBER=1` builds `0.2.0b1+torch213.dg2.1`); the public
+  base version keeps following the upstream image version.
 
 ## 0.2.0b1 - 2026-08-10
 
