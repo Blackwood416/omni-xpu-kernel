@@ -55,6 +55,7 @@ namespace dg2 {
 }
 #include "single_kernels/flash.attn.b.mha.dg2.dpas.h"
 #include "single_kernels/flash.attn.b.mha.dg2.dpas4.h"
+#include "single_kernels/flash.attn.b.mha.dg2.dpas4.d64.h"
 #endif
 
 // Helper macro: common entry-point boilerplate
@@ -78,6 +79,7 @@ extern "C" ESIMD_KERNEL_API void sdp_clear_cache(void* sycl_queue_ptr) {
 #if defined(OMNI_XPU_ARCH_DG2)
     sycl::queue& q = *reinterpret_cast<sycl::queue*>(sycl_queue_ptr);
     dg2v4::clearV4Cache(q);
+    dg2v4d64::clearV4Cache(q);
 #else
     (void)sycl_queue_ptr;
 #endif
@@ -266,19 +268,22 @@ extern "C" ESIMD_KERNEL_API void sdp_fp16_hd64(
 #endif
     SDP_ENTRY_VARS
 
+#if defined(OMNI_XPU_ARCH_DG2)
+    dg2v4d64::runSdpV4<fp16>(
+        pQ, pK, pV, pA, pO,
+        static_cast<int>(aLen), static_cast<int>(kvLen),
+        static_cast<int>(hQ), static_cast<int>(hKv), q);
+    return;
+#else
+
     q.submit([&](sycl::handler& cgh) {
         cgh.parallel_for(ndr, [=](sycl::nd_item<2> ndi) SYCL_ESIMD_KERNEL {
-#if defined(OMNI_XPU_ARCH_DG2)
-            dg2::flashAttnDg2Precomputed<fp16, 64>(
-                pQ, pK, pV, pA, pO,
-                aLen, kvLen, hQ, hKv, ndi);
-#else
             hd64::flashAttnBMhaFp16OptPrecomputed(
                 pQ, pK, pV, pA, pO,
                 aLen, kvLen, hQ, hKv, ndi);
-#endif
         });
     }).wait();
+#endif
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -306,17 +311,20 @@ extern "C" ESIMD_KERNEL_API void sdp_bf16io_hd64(
 #endif
     SDP_ENTRY_VARS
 
+#if defined(OMNI_XPU_ARCH_DG2)
+    dg2v4d64::runSdpV4<bf16>(
+        pQ, pK, pV, pA, pO,
+        static_cast<int>(aLen), static_cast<int>(kvLen),
+        static_cast<int>(hQ), static_cast<int>(hKv), q);
+    return;
+#else
+
     q.submit([&](sycl::handler& cgh) {
         cgh.parallel_for(ndr, [=](sycl::nd_item<2> ndi) SYCL_ESIMD_KERNEL {
-#if defined(OMNI_XPU_ARCH_DG2)
-            dg2::flashAttnDg2Precomputed<bf16, 64>(
-                pQ, pK, pV, pA, pO,
-                aLen, kvLen, hQ, hKv, ndi);
-#else
             hd64_bf16::flashAttnBMhaBf16IoOptPrecomputed(
                 pQ, pK, pV, pA, pO,
                 aLen, kvLen, hQ, hKv, ndi);
-#endif
         });
     }).wait();
+#endif
 }

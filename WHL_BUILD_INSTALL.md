@@ -74,6 +74,21 @@ DG2 原生 ESIMD kernel（`flash.attn.b.mha.dg2.h`），A770 上需显式设置
 
 #### DG2 ConvRot 融合状态（2026-08-15）
 
+#### DG2 D64 attention v4 移植状态（2026-08-16）
+
+`flash.attn.b.mha.dg2.dpas4.d64.h` 是 D128 v4.1 的 D64 移植（生成脚本
+`scripts/gen_dg2_d64_header.py` + 两处语义修复）：
+
+- 修复：K pack 的 chunk 映射（D128 每 lane 2 chunk → D64 每 lane 1
+  chunk）、非融合 packed-Q A 操作数按 RPT 存储、RPT=8（满 XMX 行）。
+- 正确性：fp16/bf16 D64（H=32）全 seq 1..20683 通过，fp16 max_abs
+  ≤1.5e-3，bf16 ≤1.6e-2；无 DEVICE_LOST（含 20x 压力）。
+- 性能：仍然输给 torch SDPA（L=4096/8192/20683 为 0.84-0.92x，L=1797
+  为 0.57x）。因此 ComfyUI-OmniXPU 的 `dg2_torch_d64_fp16` fallback
+  gate 保留；kernel 保留供其他目标/驱动升级后复测。
+- 已记录的负面结果：debug 构建下非融合路径对 `qState=nullptr` 解引用
+  （dump 代码让 qChunkAll 保持存活）会 DEVICE_LOST；release 构建无此问题。
+
 `int8_convrot_quant_dg2.cpp`（SLM 版）与 `int8_convrot_quant_esimd.cpp`
 （寄存器版）共同替代 `rotate_convrot` 的缓存 Hadamard matmul，并融合
 rowwise INT8 量化：
