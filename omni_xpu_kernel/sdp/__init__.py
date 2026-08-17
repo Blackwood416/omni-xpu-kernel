@@ -44,6 +44,19 @@ def sdp(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     return _get_native().sdp(q, k, v)
 
 
+def sdp_bhld(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """BHLD-direct SDP (DG2): q/k/v [B=1, H, L, D], returns [B, L, H, D].
+
+    Reads the raw [B, H, L, D] contiguous buffers directly (heads-first),
+    avoiding the three permute+copy layout conversions of :func:`sdp`.
+    The output is [B, L, H, D] contiguous, so a reshape to [B, L, H*D]
+    is a copy-free view.
+    """
+    if not _sidecar_candidates_cached():
+        raise RuntimeError("omni_xpu_kernel SDP sidecar is unavailable for this build")
+    return _get_native().sdp_bhld(q, k, v)
+
+
 def clear_cache() -> None:
     """Release sidecar-owned packed Q/K/V USM buffers.
 
@@ -56,4 +69,4 @@ def clear_cache() -> None:
     _get_native().clear_cache()
 
 
-__all__ = ["sdp", "is_available", "clear_cache"]
+__all__ = ["sdp", "sdp_bhld", "is_available", "clear_cache"]

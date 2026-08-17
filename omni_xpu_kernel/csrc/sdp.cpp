@@ -66,6 +66,8 @@ struct KernelLibrary {
 #endif
     sdp_kernel_fn fp16{nullptr};
     sdp_kernel_fn bf16io{nullptr};
+    sdp_kernel_fn fp16_bhld{nullptr};
+    sdp_kernel_fn bf16io_bhld{nullptr};
     sdp_kernel_fn fp16_fast{nullptr};   // no-clamp variant for small V
     sdp_kernel_fn fp16_hd64{nullptr};
     sdp_kernel_fn bf16io_hd64{nullptr};
@@ -133,6 +135,8 @@ KernelLibrary& get_kernel_library() {
 
         library.fp16 = reinterpret_cast<sdp_kernel_fn>(GetProcAddress(library.handle, "sdp_fp16"));
         library.bf16io = reinterpret_cast<sdp_kernel_fn>(GetProcAddress(library.handle, "sdp_bf16io"));
+        library.fp16_bhld = reinterpret_cast<sdp_kernel_fn>(GetProcAddress(library.handle, "sdp_fp16_bhld"));
+        library.bf16io_bhld = reinterpret_cast<sdp_kernel_fn>(GetProcAddress(library.handle, "sdp_bf16io_bhld"));
         library.fp16_fast = reinterpret_cast<sdp_kernel_fn>(GetProcAddress(library.handle, "sdp_fp16_fast"));
         library.fp16_hd64 = reinterpret_cast<sdp_kernel_fn>(GetProcAddress(library.handle, "sdp_fp16_hd64"));
         library.bf16io_hd64 = reinterpret_cast<sdp_kernel_fn>(GetProcAddress(library.handle, "sdp_bf16io_hd64"));
@@ -174,6 +178,8 @@ KernelLibrary& get_kernel_library() {
 
         library.fp16 = reinterpret_cast<sdp_kernel_fn>(dlsym(library.handle, "sdp_fp16"));
         library.bf16io = reinterpret_cast<sdp_kernel_fn>(dlsym(library.handle, "sdp_bf16io"));
+        library.fp16_bhld = reinterpret_cast<sdp_kernel_fn>(dlsym(library.handle, "sdp_fp16_bhld"));
+        library.bf16io_bhld = reinterpret_cast<sdp_kernel_fn>(dlsym(library.handle, "sdp_bf16io_bhld"));
         library.fp16_fast = reinterpret_cast<sdp_kernel_fn>(dlsym(library.handle, "sdp_fp16_fast"));
         library.fp16_hd64 = reinterpret_cast<sdp_kernel_fn>(dlsym(library.handle, "sdp_fp16_hd64"));
         library.bf16io_hd64 = reinterpret_cast<sdp_kernel_fn>(dlsym(library.handle, "sdp_bf16io_hd64"));
@@ -420,6 +426,81 @@ torch::Tensor sdp(torch::Tensor q, torch::Tensor k, torch::Tensor v) {
         }
     }
 
+    return out;
+}
+
+torch::Tensor sdp_bhld(torch::Tensor q, torch::Tensor k, torch::Tensor v) {
+    // BHLD-direct entry: q/k/v are contiguous [B=1, H, L, D] (heads first).
+    // The DG2 sidecar reads them with BHLD addressing and writes the output
+    // in [B, L, H, D] (BLHD), so callers avoid three permute+copy passes.
+#if !defined(OMNI_XPU_ARCH_DG2)
+    TORCH_CHECK(false, "sdp_bhld: BHLD-direct entry is DG2-only on this build");
+#endif
+    for (auto* t : {&q, &k, &v}) {
+        TORCH_CHECK(t->device().type() == c10::DeviceType::XPU, "q/k/v must be on XPU");
+        TORCH_CHECK(t->is_contiguous(), "q/k/v must be contiguous [B, H, L, D]");
+        TORCH_CHECK(t->dim() == 4, "q/k/v must be 4-D [B, H, L, D]");
+        TORCH_CHECK(t->size(0) == 1, "batch size must be 1");
+        TORCH_CHECK(t->size(3) == 64 || t->size(3) == 128, "head_dim must be 64 or 128");
+        TORCH_CHECK(t->scalar_type() == ST::Half || t->scalar_type() == ST::BFloat16,
+                    "dtype must be FP16 or BF16");
+    }
+    TORCH_CHECK(q.scalar_type() == k.scalar_type() && q.scalar_type() == v.scalar_type(),
+                "q, k, v must have the same dtype");
+    TORCH_CHECK(k.size(1) == v.size(1), "k and v must have the same head count");
+    TORCH_CHECK(q.size(2) == k.size(2) && k.size(2) == v.size(2), "k/v seq mismatch");
+    TORCH_CHECK(q.size(1) == k.size(1), "q/k head count mismatch");
+    TORCH_CHECK(q.size(3) == k.size(3) && q.size(3) == v.size(3), "head_dim mismatch");
+
+    const int64_t H = q.size(1);
+    const int64_t q_len = q.size(2);
+    const int64_t kv_len = k.size(2);
+    const int64_t kv_pad = (16 - kv_len % 16) % 16;
+    if (kv_pad > 0) {
+        auto k_new = torch::zeros({k.size(0), k.size(1), kv_len + kv_pad, k.size(3)}, k.options());
+        k_new.narrow(2, 0, kv_len).copy_(k);
+        k = k_new;
+        auto v_new = torch::zeros({v.size(0), v.size(1), kv_len + kv_pad, v.size(3)}, v.options());
+        v_new.narrow(2, 0, kv_len).copy_(v);
+        v = v_new;
+    }
+
+    auto& kernels = get_kernel_library();
+    auto& norm_alpha = norm_alpha_cache(q);
+    const void* alpha_ptr = norm_alpha.data_ptr();
+    auto out = torch::empty({q.size(0), q_len, H, q.size(3)},
+                            torch::TensorOptions().dtype(q.scalar_type()).device(q.device()));
+    sycl::queue& queue = utils::get_queue(q.device());
+
+    auto call_bhld = [&](sdp_kernel_fn kernel) {
+        TORCH_CHECK(kernel != nullptr, "sdp_bhld: kernel not available for this configuration");
+        kernel(
+            q.data_ptr(), k.data_ptr(), v.data_ptr(), const_cast<void*>(alpha_ptr),
+            out.data_ptr(),
+            static_cast<int>(q_len),
+#if defined(OMNI_XPU_ARCH_DG2)
+            static_cast<int>(kv_len),
+#else
+            static_cast<int>(kv_len + kv_pad),
+#endif
+            static_cast<int>(H), static_cast<int>(H),
+            &queue);
+    };
+
+    if (q.size(3) == 64) {
+        TORCH_CHECK(false, "sdp_bhld: head_dim=64 not exposed on the BHLD-direct path");
+    } else {
+        switch (q.scalar_type()) {
+            case ST::Half:
+                call_bhld(kernels.fp16_bhld);
+                break;
+            case ST::BFloat16:
+                call_bhld(kernels.bf16io_bhld);
+                break;
+            default:
+                TORCH_CHECK(false, "sdp_bhld: unsupported dtype");
+        }
+    }
     return out;
 }
 
