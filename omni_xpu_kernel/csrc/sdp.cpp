@@ -441,7 +441,7 @@ torch::Tensor sdp_bhld(torch::Tensor q, torch::Tensor k, torch::Tensor v) {
         TORCH_CHECK(t->is_contiguous(), "q/k/v must be contiguous [B, H, L, D]");
         TORCH_CHECK(t->dim() == 4, "q/k/v must be 4-D [B, H, L, D]");
         TORCH_CHECK(t->size(0) == 1, "batch size must be 1");
-        TORCH_CHECK(t->size(3) == 64 || t->size(3) == 128, "head_dim must be 64 or 128");
+        TORCH_CHECK(t->size(3) == 128, "BHLD-direct head_dim must be 128 (D64 not exposed)");
         TORCH_CHECK(t->scalar_type() == ST::Half || t->scalar_type() == ST::BFloat16,
                     "dtype must be FP16 or BF16");
     }
@@ -455,18 +455,16 @@ torch::Tensor sdp_bhld(torch::Tensor q, torch::Tensor k, torch::Tensor v) {
     const int64_t H = q.size(1);
     const int64_t q_len = q.size(2);
     const int64_t kv_len = k.size(2);
-    const int64_t kv_pad = (16 - kv_len % 16) % 16;
-    if (kv_pad > 0) {
-        auto k_new = torch::zeros({k.size(0), k.size(1), kv_len + kv_pad, k.size(3)}, k.options());
-        k_new.narrow(2, 0, kv_len).copy_(k);
-        k = k_new;
-        auto v_new = torch::zeros({v.size(0), v.size(1), kv_len + kv_pad, v.size(3)}, v.options());
-        v_new.narrow(2, 0, kv_len).copy_(v);
-        v = v_new;
-    }
+    // BHLD 路径不 pad K/V：DG2 v4 kernel 对越界行做 mask（作者在 A770 验证
+    // 过非 16 倍数长度行为正确）。BLHD 路径 pad 不影响 head stride，但 BHLD
+    // 下 pad 会改变每头 stride（(L+pad)*D vs L*D），kernel 按 L*D 寻址 →
+    // head>0 全部错位（作者审查指出的 blocking bug）。
 
     auto& kernels = get_kernel_library();
-    auto& norm_alpha = norm_alpha_cache(q);
+    // norm_alpha_cache(q) 对 BHLD 输入会读 q.size(2)（序列长）当 head 数，
+    // 键错但内容恒为全 1 所以无害——这里直接构造正确的 [H*D] 全 1。
+    auto norm_alpha = torch::ones({H * q.size(3)},
+                                  torch::dtype(torch::kFloat).device(q.device()));
     const void* alpha_ptr = norm_alpha.data_ptr();
     auto out = torch::empty({q.size(0), q_len, H, q.size(3)},
                             torch::TensorOptions().dtype(q.scalar_type()).device(q.device()));
@@ -478,28 +476,20 @@ torch::Tensor sdp_bhld(torch::Tensor q, torch::Tensor k, torch::Tensor v) {
             q.data_ptr(), k.data_ptr(), v.data_ptr(), const_cast<void*>(alpha_ptr),
             out.data_ptr(),
             static_cast<int>(q_len),
-#if defined(OMNI_XPU_ARCH_DG2)
             static_cast<int>(kv_len),
-#else
-            static_cast<int>(kv_len + kv_pad),
-#endif
             static_cast<int>(H), static_cast<int>(H),
             &queue);
     };
 
-    if (q.size(3) == 64) {
-        TORCH_CHECK(false, "sdp_bhld: head_dim=64 not exposed on the BHLD-direct path");
-    } else {
-        switch (q.scalar_type()) {
-            case ST::Half:
-                call_bhld(kernels.fp16_bhld);
-                break;
-            case ST::BFloat16:
-                call_bhld(kernels.bf16io_bhld);
-                break;
-            default:
-                TORCH_CHECK(false, "sdp_bhld: unsupported dtype");
-        }
+    switch (q.scalar_type()) {
+        case ST::Half:
+            call_bhld(kernels.fp16_bhld);
+            break;
+        case ST::BFloat16:
+            call_bhld(kernels.bf16io_bhld);
+            break;
+        default:
+            TORCH_CHECK(false, "sdp_bhld: unsupported dtype");
     }
     return out;
 }
