@@ -700,6 +700,10 @@ class ICPXBuildExt(build_ext):
                 if has_onednn:
                     cmd.append(f"/I{onednn_include}")
                 cmd += [str(s) for s in sources]
+                # Intel OpenMP runtime (libircmt.lib) - icx link requirement
+                _compiler_lib = str(Path(icpx).resolve().parent.parent / "lib")
+                cmd.append("/link")
+                cmd.append(f"/LIBPATH:{_compiler_lib}")
             else:
                 core_aot_args = get_core_aot_compile_args(BUILD_XPU_TARGET)
                 common_compile = [
@@ -744,6 +748,9 @@ class ICPXBuildExt(build_ext):
                     "torch.lib", "torch_python.lib", "torch_cpu.lib", "torch_xpu.lib", "c10.lib", "c10_xpu.lib",
                     f"python{python_version}.lib",
                 ]
+                # Intel OpenMP runtime (libircmt.lib) - icx link requirement
+                _compiler_lib = str(Path(icpx).resolve().parent.parent / "lib")
+                cmd.append(f"/LIBPATH:{_compiler_lib}")
                 if has_onednn:
                     cmd.append(str(onednn_library))
         else:

@@ -121,7 +121,7 @@ extern "C" ESIMD_KERNEL_API void sdp_fp16(
     dg2v4::runSdpV4<fp16>(
         pQ, pK, pV, pA, pO,
         static_cast<int>(aLen), static_cast<int>(kvLen),
-        static_cast<int>(hQ), static_cast<int>(hKv), q);
+        static_cast<int>(hQ), static_cast<int>(hKv), false, q);
 #endif
     return;
 #endif
@@ -177,7 +177,7 @@ extern "C" ESIMD_KERNEL_API void sdp_bf16io(
     dg2v4::runSdpV4<bf16>(
         pQ, pK, pV, pA, pO,
         static_cast<int>(aLen), static_cast<int>(kvLen),
-        static_cast<int>(hQ), static_cast<int>(hKv), q);
+        static_cast<int>(hQ), static_cast<int>(hKv), false, q);
 #endif
     return;
 #endif
@@ -224,7 +224,7 @@ extern "C" ESIMD_KERNEL_API void sdp_fp16_fast(
     dg2v4::runSdpV4<fp16>(
         pQ, pK, pV, pA, pO,
         static_cast<int>(aLen), static_cast<int>(kvLen),
-        static_cast<int>(hQ), static_cast<int>(hKv), q);
+        static_cast<int>(hQ), static_cast<int>(hKv), false, q);
     return;
 #endif
 
@@ -241,6 +241,56 @@ extern "C" ESIMD_KERNEL_API void sdp_fp16_fast(
 #endif
         });
     }).wait();
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// sdp_fp16_bhld / sdp_bf16io_bhld: BHLD-input direct entries (DG2).
+// Q/K/V arrive as contiguous [B=1, H, L, D] (heads before sequence). The DG2
+// v4.1 kernels read with BHLD addressing and still write [B, L, H, D] output,
+// so callers avoid the three permute+copy layout conversions.
+// ──────────────────────────────────────────────────────────────────────────────
+extern "C" ESIMD_KERNEL_API void sdp_fp16_bhld(
+    void* Q, void* K, void* V,
+    void* normAlpha,
+    void* out,
+    int q_len, int kv_len,
+    int headQ, int headKv,
+    void* sycl_queue_ptr)
+{
+    sycl::queue& q = *reinterpret_cast<sycl::queue*>(sycl_queue_ptr);
+    SDP_ENTRY_VARS
+#if defined(OMNI_XPU_ARCH_DG2)
+    dg2v4::runSdpV4<fp16>(
+        pQ, pK, pV, pA, pO,
+        static_cast<int>(aLen), static_cast<int>(kvLen),
+        static_cast<int>(hQ), static_cast<int>(hKv), true, q);
+#else
+    // Non-DG2 builds do not expose the BHLD-direct path; route through the
+    // standard entry (callers must gate on DG2 before using it).
+    sdp_fp16(Q, K, V, normAlpha, out, q_len, kv_len, headQ, headKv,
+             sycl_queue_ptr);
+#endif
+}
+
+extern "C" ESIMD_KERNEL_API void sdp_bf16io_bhld(
+    void* Q, void* K, void* V,
+    void* normAlpha,
+    void* out,
+    int q_len, int kv_len,
+    int headQ, int headKv,
+    void* sycl_queue_ptr)
+{
+    sycl::queue& q = *reinterpret_cast<sycl::queue*>(sycl_queue_ptr);
+    SDP_ENTRY_VARS
+#if defined(OMNI_XPU_ARCH_DG2)
+    dg2v4::runSdpV4<bf16>(
+        pQ, pK, pV, pA, pO,
+        static_cast<int>(aLen), static_cast<int>(kvLen),
+        static_cast<int>(hQ), static_cast<int>(hKv), true, q);
+#else
+    sdp_bf16io(Q, K, V, normAlpha, out, q_len, kv_len, headQ, headKv,
+               sycl_queue_ptr);
+#endif
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

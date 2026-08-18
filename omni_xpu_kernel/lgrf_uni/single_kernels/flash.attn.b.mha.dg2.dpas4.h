@@ -98,6 +98,7 @@ ESIMD_INLINE void packQDg2(
     const uint8_t* qState,
     uint32_t qLen,
     uint32_t headQ,
+    bool bhld,
     sycl::nd_item<1>& ndi) {
   constexpr int RPT = DG2V4_RPT;
   constexpr int DCHUNKS = 8;
@@ -119,7 +120,10 @@ ESIMD_INLINE void packQDg2(
     const int qrow = qrowBase + r;
     if (qrow < static_cast<int>(qLen)) {
       const ElemT* qp = reinterpret_cast<const ElemT*>(qState) +
-                        (static_cast<size_t>(qrow) * headQ + headIdx) * 128;
+                        (bhld
+                             ? (static_cast<size_t>(headIdx) * qLen + qrow)
+                             : (static_cast<size_t>(qrow) * headQ + headIdx)) *
+                            128;
 #pragma unroll
       for (int c = 0; c < DCHUNKS; c++) {
         qrows.template select<16, 1>(r * 128 + c * 16) =
@@ -156,6 +160,7 @@ ESIMD_INLINE void packKvDg2(
     uint32_t kvLen,
     uint32_t headQ,
     uint32_t headKv,
+    bool bhld,
     sycl::nd_item<1>& ndi) {
   constexpr int BN = DG2V4_BN;
   constexpr int KG = BN / 8;     // K row groups of 8
@@ -187,10 +192,12 @@ ESIMD_INLINE void packKvDg2(
           const int row = kvBase + g * 8 + r;
           simd<ElemT, 16> chunk = 0;
           if (row < static_cast<int>(kvLen)) {
+            const size_t kOff =
+                bhld ? (static_cast<size_t>(headIdx) * kvLen + row)
+                     : (static_cast<size_t>(row) * headKv + headIdx);
             chunk = block_load<ElemT, 16>(
                 reinterpret_cast<const ElemT*>(kState) +
-                    static_cast<size_t>(row) * headKv * 128 +
-                    static_cast<size_t>(headIdx) * 128 + c * 16,
+                    kOff * 128 + c * 16,
                 overaligned_tag<16>{});
           }
           rows.template select<16, 1>(r * 16) = chunk;
@@ -229,17 +236,21 @@ ESIMD_INLINE void packKvDg2(
         simd<ElemT, 16> lo = 0;
         simd<ElemT, 16> hi = 0;
         if (row0 < static_cast<int>(kvLen)) {
+          const size_t vOff0 =
+              bhld ? (static_cast<size_t>(headIdx) * kvLen + row0)
+                   : (static_cast<size_t>(row0) * headKv + headIdx);
           lo = block_load<ElemT, 16>(
               reinterpret_cast<const ElemT*>(vState) +
-                  static_cast<size_t>(row0) * headKv * 128 +
-                  static_cast<size_t>(headIdx) * 128 + c * 16,
+                  vOff0 * 128 + c * 16,
               overaligned_tag<16>{});
         }
         if (row1 < static_cast<int>(kvLen)) {
+          const size_t vOff1 =
+              bhld ? (static_cast<size_t>(headIdx) * kvLen + row1)
+                   : (static_cast<size_t>(row1) * headKv + headIdx);
           hi = block_load<ElemT, 16>(
               reinterpret_cast<const ElemT*>(vState) +
-                  static_cast<size_t>(row1) * headKv * 128 +
-                  static_cast<size_t>(headIdx) * 128 + c * 16,
+                  vOff1 * 128 + c * 16,
               overaligned_tag<16>{});
         }
 #pragma unroll
@@ -292,6 +303,7 @@ ESIMD_INLINE void attnDg2(
     uint32_t kvLen,
     uint32_t headQ,
     uint32_t headKv,
+    bool bhld,
     bool stageOnly,
     bool qkOnly,
     bool dumpState,
@@ -349,7 +361,10 @@ ESIMD_INLINE void attnDg2(
     const int qrow = qrowBase + r;
     if (qrow < static_cast<int>(qLen)) {
       const ElemT* qp = reinterpret_cast<const ElemT*>(qState) +
-                        (static_cast<size_t>(qrow) * headQ + headIdx) * 128;
+                        (bhld
+                             ? (static_cast<size_t>(headIdx) * qLen + qrow)
+                             : (static_cast<size_t>(qrow) * headQ + headIdx)) *
+                            128;
 #pragma unroll
       for (int c = 0; c < DCHUNKS; c++) {
         qChunkAll.template select<16, 1>(c * RPT * 16 + r * 16) =
@@ -392,10 +407,12 @@ ESIMD_INLINE void attnDg2(
               const int row = t * BN + g * 8 + r;
               simd<ElemT, 16> chunk = 0;
               if (row < static_cast<int>(kvLen)) {
+                const size_t kOff =
+                    bhld ? (static_cast<size_t>(headIdx) * kvLen + row)
+                         : (static_cast<size_t>(row) * headKv + headIdx);
                 chunk = block_load<ElemT, 16>(
                     reinterpret_cast<const ElemT*>(kState) +
-                        static_cast<size_t>(row) * headKv * 128 +
-                        static_cast<size_t>(headIdx) * 128 + c * 16,
+                        kOff * 128 + c * 16,
                     overaligned_tag<16>{});
               }
               rows.template select<16, 1>(r * 16) = chunk;
@@ -431,17 +448,21 @@ ESIMD_INLINE void attnDg2(
           simd<ElemT, 16> lo = 0;
           simd<ElemT, 16> hi = 0;
           if (row0 < static_cast<int>(kvLen)) {
+            const size_t vOff0 =
+                bhld ? (static_cast<size_t>(headIdx) * kvLen + row0)
+                     : (static_cast<size_t>(row0) * headKv + headIdx);
             lo = block_load<ElemT, 16>(
                 reinterpret_cast<const ElemT*>(vState) +
-                    static_cast<size_t>(row0) * headKv * 128 +
-                    static_cast<size_t>(headIdx) * 128 + c * 16,
+                    vOff0 * 128 + c * 16,
                 overaligned_tag<16>{});
           }
           if (row1 < static_cast<int>(kvLen)) {
+            const size_t vOff1 =
+                bhld ? (static_cast<size_t>(headIdx) * kvLen + row1)
+                     : (static_cast<size_t>(row1) * headKv + headIdx);
             hi = block_load<ElemT, 16>(
                 reinterpret_cast<const ElemT*>(vState) +
-                    static_cast<size_t>(row1) * headKv * 128 +
-                    static_cast<size_t>(headIdx) * 128 + c * 16,
+                    vOff1 * 128 + c * 16,
                 overaligned_tag<16>{});
           }
 #pragma unroll
@@ -525,6 +546,7 @@ ESIMD_INLINE void attnDg2(
       }
 #pragma unroll
       for (int r = 0; r < RPT; r++) {
+        simd<ElemT, 8> srow;
 #pragma unroll
         for (int i = 0; i < 8; i++) {
           const int j = g * 8 + i;
@@ -532,10 +554,12 @@ ESIMD_INLINE void attnDg2(
           if (t * BN + j >= static_cast<int>(kvLen)) {
             s = MASKED_SCORE;
           }
-          // Store scores chunk-major directly in pChunk: [j/16][r][j%16].
-          pChunkAll[(j / 16) * RPT * 16 + r * 16 + (j % 16)] =
-              static_cast<ElemT>(s);
+          srow[i] = static_cast<ElemT>(s);
         }
+        // Store scores chunk-major directly in pChunk: [j/16][r][j%16].
+        // For a fixed kv-group g the 8 scores are contiguous in j%16.
+        pChunkAll.template select<8, 1>((g / 2) * RPT * 16 + r * 16 +
+                                        (g % 2) * 8) = srow;
       }
     }
 
@@ -797,6 +821,7 @@ inline void runSdpV4(
     int kvLen,
     int headQ,
     int headKv,
+    bool bhld,
     sycl::queue& queue) {
   constexpr int BN = DG2V4_BN;
   const int nTiles = (kvLen + BN - 1) / BN;
@@ -805,8 +830,9 @@ inline void runSdpV4(
   // packK/V buffer sizes depend on headKv/kvLen. Reusing across a GQA head
   // count change would alias differently-sized buffers.
   const uint64_t key =
-      (static_cast<uint64_t>(headQ) << 48) |
-      (static_cast<uint64_t>(headKv) << 40) |
+      (static_cast<uint64_t>(headQ) << 49) |
+      (static_cast<uint64_t>(headKv) << 41) |
+      (static_cast<uint64_t>(bhld ? 1 : 0) << 40) |
       (static_cast<uint64_t>(static_cast<uint32_t>(qLen)) << 16) |
       static_cast<uint32_t>(kvLen);
 
@@ -920,6 +946,7 @@ inline void runSdpV4(
                 static_cast<const uint8_t*>(q),
                 static_cast<uint32_t>(qLen),
                 static_cast<uint32_t>(headQ),
+                bhld,
                 ndi);
           });
     });
@@ -936,6 +963,7 @@ inline void runSdpV4(
                 static_cast<uint32_t>(kvLen),
                 static_cast<uint32_t>(headQ),
                 static_cast<uint32_t>(headKv),
+                bhld,
                 ndi);
         });
     });
@@ -961,6 +989,7 @@ inline void runSdpV4(
                   static_cast<uint32_t>(kvLen),
                   static_cast<uint32_t>(headQ),
                   static_cast<uint32_t>(headKv),
+                  bhld,
                   stageOnly,
                   qkOnly,
                   dumpState,
@@ -990,6 +1019,7 @@ inline void runSdpV4(
                   static_cast<uint32_t>(kvLen),
                   static_cast<uint32_t>(headQ),
                   static_cast<uint32_t>(headKv),
+                  bhld,
                   stageOnly,
                   qkOnly,
                   dumpState,

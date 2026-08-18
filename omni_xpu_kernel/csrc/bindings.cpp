@@ -84,6 +84,7 @@ namespace rotary {
 }
 namespace sdp {
     torch::Tensor sdp(torch::Tensor q, torch::Tensor k, torch::Tensor v);
+    torch::Tensor sdp_bhld(torch::Tensor q, torch::Tensor k, torch::Tensor v);
     void clear_cache();
 }
 namespace linear {
@@ -519,6 +520,11 @@ PYBIND11_MODULE(_C, m) {
         "V is automatically per-head scaled to prevent fp16 accumulator overflow.\n"
         "Returns: (output, has_nonfinite) where has_nonfinite is True if kernel\n"
         "detected inf/nan (e.g. degenerate softmax), signaling SDPA fallback needed.",
+        py::arg("q"), py::arg("k"), py::arg("v"));
+    sdp.def("sdp_bhld", &omni_xpu::sdp::sdp_bhld,
+        "DG2 BHLD-direct Flash Attention (no permute+copy)\n"
+        "Input: q/k/v [B=1, H, L, D] fp16/bf16 contiguous on XPU, D == 128\n"
+        "Returns: [B, L, H, D] output (BLHD) for copy-free reshape to BLD.",
         py::arg("q"), py::arg("k"), py::arg("v"));
     sdp.def("clear_cache", &omni_xpu::sdp::clear_cache,
         "Release sidecar-owned packed Q/K/V USM buffers. ComfyUI model "
