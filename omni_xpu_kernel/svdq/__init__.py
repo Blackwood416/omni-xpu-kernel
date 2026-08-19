@@ -125,6 +125,30 @@ def onednn_int4_gemm_preconverted(
     return _get_native().onednn_int4_gemm_preconverted(act, packed_u4, scales_f16)
 
 
+def onednn_int4_gemm_torchao(
+    act: torch.Tensor,
+    packed_u4: torch.Tensor,
+    zp_u8: torch.Tensor,
+    scales_f16: torch.Tensor,
+) -> torch.Tensor:
+    """
+    torchao-format INT4 native (asymmetric): unsigned u4 weights + per-block
+    zero points + per-block f16 scales. w = (q - zp) * scale inside oneDNN —
+    no conversion, no correction. Asymmetric per-block zero point reduces
+    quantization error on biased weight distributions.
+
+    Args:
+        act: [M, K] bf16/f16/f32 activations
+        packed_u4: [N, K/2] uint8 — RAW qdata byte view (unsigned nibbles, NO xor)
+        zp_u8: [num_groups, N] uint8 — per-block zero points
+        scales_f16: [num_groups, N] f16 — per-block weight scales
+
+    Returns:
+        [M, N] same dtype as act
+    """
+    return _get_native().onednn_int4_gemm_torchao(act, packed_u4, zp_u8, scales_f16)
+
+
 def onednn_int4_gemm_add_to_output(
     act: torch.Tensor,
     packed_u4: torch.Tensor,
@@ -231,6 +255,7 @@ __all__ = [
     "quantize_act_uint4",
     "onednn_int4_gemm",
     "onednn_int4_gemm_preconverted",
+    "onednn_int4_gemm_torchao",
     "onednn_int4_gemm_add_to_output",
     "prepare_onednn_weights",
     "fused_convert_add",
