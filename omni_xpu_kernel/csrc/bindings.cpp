@@ -18,7 +18,7 @@
 
 namespace omni_xpu {
 namespace layout {
-#if defined(OMNI_XPU_ARCH_BMG)
+#if defined(OMNI_XPU_ARCH_BMG) || defined(OMNI_XPU_ARCH_DG2)
     torch::Tensor cat_pad_bmg(
         torch::Tensor prefix, torch::Tensor input, int64_t spatial_pad);
 #endif
@@ -40,6 +40,8 @@ namespace norm {
     torch::Tensor group_norm_bmg(
         torch::Tensor input, int64_t groups, torch::Tensor weight,
         torch::Tensor bias, double eps);
+#endif
+#if defined(OMNI_XPU_ARCH_BMG) || defined(OMNI_XPU_ARCH_DG2)
     torch::Tensor group_norm_seedvr_bmg(
         torch::Tensor input, int64_t groups, torch::Tensor weight,
         torch::Tensor bias, double eps);
@@ -289,7 +291,7 @@ PYBIND11_MODULE(_C, m) {
 
     auto layout = m.def_submodule(
         "layout", "Validated layout and materialization fusions");
-#if defined(OMNI_XPU_ARCH_BMG)
+#if defined(OMNI_XPU_ARCH_BMG) || defined(OMNI_XPU_ARCH_DG2)
     layout.attr("__cat_pad_bmg__") = true;
     layout.def(
         "cat_pad_bmg",
@@ -346,13 +348,17 @@ PYBIND11_MODULE(_C, m) {
 
 #if defined(OMNI_XPU_ARCH_BMG)
     norm.attr("__group_norm_bmg__") = true;
-    norm.attr("__group_norm_seedvr_bmg__") = true;
     norm.def(
         "group_norm_bmg",
         &omni_xpu::norm::group_norm_bmg,
         "BMG GroupNorm for validated Boogu Image Turbo activation shapes",
         py::arg("input"), py::arg("groups"), py::arg("weight"),
         py::arg("bias"), py::arg("eps") = 1e-6);
+#else
+    norm.attr("__group_norm_bmg__") = false;
+#endif
+#if defined(OMNI_XPU_ARCH_BMG) || defined(OMNI_XPU_ARCH_DG2)
+    norm.attr("__group_norm_seedvr_bmg__") = true;
     norm.def(
         "group_norm_seedvr_bmg",
         &omni_xpu::norm::group_norm_seedvr_bmg,
@@ -360,7 +366,6 @@ PYBIND11_MODULE(_C, m) {
         py::arg("input"), py::arg("groups"), py::arg("weight"),
         py::arg("bias"), py::arg("eps") = 1e-6);
 #else
-    norm.attr("__group_norm_bmg__") = false;
     norm.attr("__group_norm_seedvr_bmg__") = false;
 #endif
 

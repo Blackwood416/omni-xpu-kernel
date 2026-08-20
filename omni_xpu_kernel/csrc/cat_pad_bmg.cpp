@@ -9,7 +9,7 @@
 
 #include "utils.h"
 
-#if defined(OMNI_XPU_ARCH_BMG)
+#if defined(OMNI_XPU_ARCH_BMG) || defined(OMNI_XPU_ARCH_DG2)
 
 using fp16 = sycl::half;
 
