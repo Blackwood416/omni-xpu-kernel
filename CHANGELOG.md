@@ -5,6 +5,14 @@ Notable user-facing changes will be recorded here when a public
 
 ## Unreleased
 
+- Enable the SeedVR2 cat-pad and SeedVR group-norm kernels on DG2 (validated
+  on A770: cat-pad 7.2 ms vs torch 9.3 ms for `[1,128,4,512,512]` fp16;
+  group-norm 2.95 ms vs 5.40 ms for the temporal-interleaved
+  `[4,128,512,512]` contract). End-to-end SeedVR2 3B INT8 upscale workflow
+  drops from 681 s to 607 s on A770.
+- Add generic INT8 large-M rowwise tiling for big dynamic INT8 linears
+  (verified bit-identical to the whole-tensor path on DG2).
+
 ## 0.2.0b1+torch213.dg2.1 - 2026-08-16
 
 - Add the A770/DG2 D64 DPAS attention port (attention v4.1, fp16 and bf16

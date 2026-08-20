@@ -820,6 +820,37 @@ Windows wheel 使用 ABI 后缀，例如
    `torch\lib` 是否可见；
 5. 测试 cwd 是否离开源码 checkout。
 
+#### SeedVR2 A770 优化与负面结果（2026-08-19/20）
+
+目标：`seedvr2_3b_int8_upscale_video.json`（输入 124 帧 1280x2304，3B
+INT8 ConvRot 模型，A770 / torch 2.13 / oneAPI 2026.1 / driver 8860）。
+
+实测端到端：**681 s → 607 s**（decode 415→362 s，encode 162→146 s，
+sampling 82→78 s）。
+
+- DG2 启用 SeedVR2 cat-pad（`[1,128,4,512,512]` temporal-major + 连续
+  prefix）与 SeedVR group-norm（`[4,128,512,512]` temporal-interleaved）：
+  standalone 分别 7.2 vs 9.3 ms、2.95 vs 5.4 ms（vs torch），输出与
+  torch 一致（cat-pad 逐位一致，group-norm 在 fp16 噪声内）。
+- Attention dispatch：A770 D128 bf16/fp16 在 `q_len∈[1024,2048)∪
+  (2048,4096)` 区间 esimd 比 torch SDPA 慢 1.1-1.6x，`q_len==2048` 与
+  `q_len>=4096` 才占优；插件按此回退 torch。
+
+已记录的负面结果：
+
+- **单次 USM 分配上限约 4 GiB**（3.9 GiB 成功、4.0 GiB 失败，即使空闲
+  14+ GiB）；`UR_L0_ENABLE_RELAXED_ALLOCATION_LIMITS=1` 可解除（4.0 /
+  4.12 / 5.27 / 8.0 GiB 均成功）。未设置时 SeedVR2 decode 的 4.12 GiB
+  fp32 结果会 OOM，ComfyUI-OmniXPU 提供 CPU staging fallback。
+- VTune（attach decode 300 s）：GPU Time 99.7%，XVE Array
+  Stalled/Idle 68.1% —— decode 是 GPU 满负荷、conv3d 访存/占用受限，
+  host 不是瓶颈；oneDNN 仍是该形状的最强 conv 基线。
+- spatial tile 512→1024：decode 峰值内存超过 16 GiB，直接 OOM。
+- temporal_size 64→125（外层 3→2 chunk）：decode 365 vs 362 s，无收益
+  —— 总帧数决定成本，外层 chunk 数不是瓶颈。
+- INT8 fast-path copy 阈值 16Mi→4Mi：中型 int8 linear 接入快路径但
+  采样无提升（77 vs 78 s），默认阈值保持 16Mi。
+
 ## 10. Torch 2.13 后续阶段
 
 Torch 2.13 不能直接复用本文的 `torch212.bmg` wheel。原 Portable 的
