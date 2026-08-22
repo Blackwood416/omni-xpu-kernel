@@ -63,12 +63,17 @@ namespace svdq {
     torch::Tensor unpack_svdq_int4(const torch::Tensor& packed, bool is_signed);
     std::tuple<torch::Tensor, torch::Tensor> quantize_svdq_act_int4(const torch::Tensor& input, int64_t group_size);
     std::tuple<torch::Tensor, torch::Tensor> quantize_svdq_act_uint4(const torch::Tensor& input, int64_t group_size);
+    std::tuple<torch::Tensor, torch::Tensor> quantize_svdq_act_s8(const torch::Tensor& input, int64_t group_size);
     torch::Tensor onednn_int4_gemm(const torch::Tensor& act, const torch::Tensor& packed, const torch::Tensor& wscales);
     torch::Tensor onednn_int4_gemm_preconverted(const torch::Tensor& act, const torch::Tensor& packed_u4, const torch::Tensor& scales_f16);
     torch::Tensor onednn_int4_gemm_torchao(
         const torch::Tensor& act, const torch::Tensor& packed_u4,
         const torch::Tensor& zp_u8, const torch::Tensor& scales_f16);
     void onednn_int4_gemm_add_to_output(const torch::Tensor& act, const torch::Tensor& packed_u4, const torch::Tensor& scales_f16, torch::Tensor& dst);
+    torch::Tensor onednn_s8u4_gemm(
+        const torch::Tensor& act, const torch::Tensor& xscales,
+        const torch::Tensor& packed_u4, const torch::Tensor& scales_f16,
+        torch::ScalarType out_dtype, std::optional<torch::Tensor> zp_u8);
     void fused_convert_add(torch::Tensor& out, const torch::Tensor& result, const torch::Tensor& residual);
     torch::Tensor fused_smooth_convert(const torch::Tensor& x, const torch::Tensor& smooth_factor);
     torch::Tensor fused_smooth_mul_convert(const torch::Tensor& x, const torch::Tensor& rcp_smooth);
@@ -431,6 +436,11 @@ PYBIND11_MODULE(_C, m) {
     svdq.def("quantize_svdq_act_uint4", &omni_xpu::svdq::quantize_svdq_act_uint4,
         "Quantize non-negative activation to unsigned U4 [0, 15]",
         py::arg("input"), py::arg("group_size") = 64);
+    svdq.def("quantize_svdq_act_s8", &omni_xpu::svdq::quantize_svdq_act_s8,
+        "Quantize activation to symmetric S8 with per-group absmax scaling\n"
+        "Input: [M, K] fp16/bf16\n"
+        "Output: (act_s8 [M, K] int8, scales [M, G] f32)",
+        py::arg("input"), py::arg("group_size") = 64);
 
     svdq.def("onednn_int4_gemm", &omni_xpu::svdq::onednn_int4_gemm,
         "Fused INT4 dequant + GEMM using oneDNN u4 matmul primitive\n"
@@ -456,6 +466,14 @@ PYBIND11_MODULE(_C, m) {
         "byte view, NO xor), zp_u8 [G, N] uint8, scales_f16 [G, N] f16\n"
         "Output: [M, N] same dtype as act",
         py::arg("act"), py::arg("packed_u4"), py::arg("zp_u8"), py::arg("scales_f16"));
+
+    svdq.def("onednn_s8u4_gemm", &omni_xpu::svdq::onednn_s8u4_gemm,
+        "W4A8 GEMM: s8 act x u4 packed weights via oneDNN. zp_u8=None 走标量 "
+        "zp=8（wa4）；zp_u8=[G_wei, N] 走 per-block zp（tint4/torchao 非对称，"
+        "w=(q-zp)*scale 在 oneDNN 内完成）",
+        py::arg("act"), py::arg("xscales"), py::arg("packed_u4"),
+        py::arg("scales_f16"), py::arg("out_dtype") = torch::kBFloat16,
+        py::arg("zp_u8") = py::none());
 
     svdq.def("onednn_int4_gemm_add_to_output", &omni_xpu::svdq::onednn_int4_gemm_add_to_output,
         "Fused INT4 GEMM + accumulate into bf16 output using oneDNN append_sum post-op\n"

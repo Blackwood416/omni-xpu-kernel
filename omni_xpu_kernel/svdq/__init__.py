@@ -246,6 +246,36 @@ def prepare_onednn_weights(
     scales_f16 = wscales.to(torch.float16).contiguous()
     return packed_u4, scales_f16
 
+def quantize_act_s8(
+    input: torch.Tensor,
+    group_size: int = 64,
+) -> tuple:
+    """Per-group symmetric s8 activation quantization for W4A8.
+
+    Args:
+        input: [M, K] fp16/bf16 activation tensor.
+        group_size: quantization group size (32 or 64).
+
+    Returns:
+        (act_s8 [M, K] int8, scales [M, num_groups] f32)
+    """
+    return _get_native().quantize_svdq_act_s8(input, group_size)
+
+
+def onednn_s8u4_gemm(
+    act: torch.Tensor,
+    xscales: torch.Tensor,
+    packed_u4: torch.Tensor,
+    scales_f16: torch.Tensor,
+    out_dtype: torch.dtype = torch.bfloat16,
+    zp_u8: torch.Tensor | None = None,
+) -> torch.Tensor:
+    out = _get_native().onednn_s8u4_gemm(
+        act, xscales, packed_u4, scales_f16, out_dtype, zp_u8
+    )
+    # native returns f32 (wide accumulator); cast to the model dtype here.
+    return out.to(out_dtype)
+
 
 __all__ = [
     "dequantize_w4",
@@ -253,11 +283,13 @@ __all__ = [
     "unpack_int4",
     "quantize_act_int4",
     "quantize_act_uint4",
+    "quantize_act_s8",
     "onednn_int4_gemm",
     "onednn_int4_gemm_preconverted",
     "onednn_int4_gemm_torchao",
     "onednn_int4_gemm_add_to_output",
     "prepare_onednn_weights",
+    "onednn_s8u4_gemm",
     "fused_convert_add",
     "fused_smooth_convert",
     "fused_smooth_mul_convert",
