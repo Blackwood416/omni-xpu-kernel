@@ -107,10 +107,14 @@ static CachedPrimitive& get_or_create_primitive(
 
     std::string impl_info = pd.impl_info_str();
     const char* tag = use_sum_postop ? "onednn_int4_gemm_sum" : "onednn_int4_gemm";
-    fprintf(stderr, "[%s] CACHE MISS: impl=%s (M=%ld K=%ld N=%ld gs=%ld)\n",
-            tag, impl_info.c_str(), M, K, N, group_size);
-    if (impl_info.find("ref") != std::string::npos) {
-        fprintf(stderr, "[%s] WARNING: reference fallback (slow)\n", tag);
+    // Primitive cache misses are expected during warm-up (one per new shape).
+    // Print only when requested: OMNI_XPU_DEBUG=gemm (or =1 / =all).
+    if (omni_xpu::debug::is_enabled("gemm")) {
+        fprintf(stderr, "[%s] CACHE MISS: impl=%s (M=%ld K=%ld N=%ld gs=%ld)\n",
+                tag, impl_info.c_str(), M, K, N, group_size);
+        if (impl_info.find("ref") != std::string::npos) {
+            fprintf(stderr, "[%s] WARNING: reference fallback (slow)\n", tag);
+        }
     }
 
     cp.prim = dnnl::matmul(pd);
@@ -157,12 +161,16 @@ static CachedPrimitive& get_or_create_primitive_zp(
     dnnl::matmul::primitive_desc pd(cp.eng, cp.src_md, cp.wei_md, cp.dst_md, attr);
 
     std::string impl_info = pd.impl_info_str();
-    fprintf(stderr, "[onednn_int4_gemm_torchao] CACHE MISS: impl=%s (M=%ld K=%ld N=%ld gs=%ld)\n",
-            impl_info.c_str(), M, K, N, group_size);
-    fprintf(stderr, "[onednn_int4_gemm_torchao] scratchpad=%zu B (%.1f MB)\n",
-            pd.scratchpad_desc().get_size(), pd.scratchpad_desc().get_size() / 1048576.0);
-    if (impl_info.find("ref") != std::string::npos) {
-        fprintf(stderr, "[onednn_int4_gemm_torchao] WARNING: reference fallback (slow)\n");
+    // Primitive cache misses are expected during warm-up (one per new shape).
+    // Print only when requested: OMNI_XPU_DEBUG=gemm (or =1 / =all).
+    if (omni_xpu::debug::is_enabled("gemm")) {
+        fprintf(stderr, "[onednn_int4_gemm_torchao] CACHE MISS: impl=%s (M=%ld K=%ld N=%ld gs=%ld)\n",
+                impl_info.c_str(), M, K, N, group_size);
+        fprintf(stderr, "[onednn_int4_gemm_torchao] scratchpad=%zu B (%.1f MB)\n",
+                pd.scratchpad_desc().get_size(), pd.scratchpad_desc().get_size() / 1048576.0);
+        if (impl_info.find("ref") != std::string::npos) {
+            fprintf(stderr, "[onednn_int4_gemm_torchao] WARNING: reference fallback (slow)\n");
+        }
     }
 
     cp.prim = dnnl::matmul(pd);
