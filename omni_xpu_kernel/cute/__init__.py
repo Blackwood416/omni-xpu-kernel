@@ -144,7 +144,13 @@ def _sol_attn_exact_library():
 
 
 def supports_sol_attn() -> bool:
-    """Whether the DG2 Sol-Attn ESIMD sidecar is packaged."""
+    """Whether a DG2 Sol-Attn backend is packaged (two-phase or single)."""
+    try:
+        _sol_attn_sum_library()
+        _sol_attn_exact_library()
+        return True
+    except Exception:
+        pass
     try:
         _sol_attn_library()
         return True
