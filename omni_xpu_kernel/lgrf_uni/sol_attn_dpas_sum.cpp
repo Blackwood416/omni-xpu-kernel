@@ -180,11 +180,13 @@ ESIMD_INLINE void packVcDg2(
 }
 
 // ── summary：per (head, qTile 256 行) 全块在线 softmax 摘要 ──
-// 输入 packedQ（已打包）、packedKc/packedVc（已打包、N 已 padding）。
+// 输入 colmean（查询块质心分数 [H,QN,N] f32，log2 域，来自 prepare 的
+// score 矩阵；本 kernel 转线性域）、packedVc（已打包、N 已 padding）。
+// 每行共享其查询块的质心分数（kitchen centroid-tail：routing 64x 缩小，
+// 精度代价 ~5e-4 cosine）。
 // 输出：m/l fp32 [T,H]；acc bf16 [T,H,128]（在线 softmax 初始值）。
-// 结构 = dpas4 attnDg2：QK 写 bf16 pChunk（就地 softmax）→ P@Vc DPAS。
 ESIMD_INLINE void summaryDg2(
-    const uint8_t* packedQ, const uint8_t* packedKc, const uint8_t* packedVc,
+    const float* colmean, const uint8_t* packedVc,
     const uint8_t* routes,
     float* outM, float* outL, bf16* outAcc,
     uint32_t qLen, uint32_t kvLen, uint32_t headQ, uint32_t nBlocks,
@@ -195,14 +197,10 @@ ESIMD_INLINE void summaryDg2(
   const int headIdx = gid / qTiles;
   const int qTile = gid % qTiles;
   const int qrowBase = qTile * QGRP + lid * RPT;
-  const int nGroups = static_cast<int>(nPad) / 8;
   const int pgTotal = static_cast<int>(nPad) / 16;
   const int nChunks = (static_cast<int>(nBlocks) + NCHUNK - 1) / NCHUNK;
   // 每线程 8 行落在同一个 64 行 qblock 内
   const int qblock = qTile * 4 + lid / RPT;
-
-  const size_t qPackBase =
-      (static_cast<size_t>(headIdx) * qTiles + qTile) * WG + lid;
 
   float mArr[RPT];
   float lArr[RPT];
@@ -225,36 +223,24 @@ ESIMD_INLINE void summaryDg2(
       lens[i] = (n >= static_cast<int>(nBlocks)) ? 0.0f : len;
     }
 
-    // ── QK^T：32 列分数写入 pChunk（bf16，padding 列 -1e30）──
-#pragma unroll
-    for (int ng = 0; ng < 4; ng++) {
-      simd<float, 64> c64 = 0;
-#pragma unroll
-      for (int c = 0; c < DCHUNKS; c++) {
-        simd<bf16, 128> a = block_load<bf16, 128>(
-            reinterpret_cast<const bf16*>(packedQ) + qPackBase * (RPT * 128) +
-                c * 128,
-            overaligned_tag<16>{});
-        const int g = nc * 4 + ng;
-        simd<uint32_t, 64> braw = block_load<uint32_t, 64>(
-            reinterpret_cast<const uint32_t*>(packedKc) +
-                (static_cast<size_t>(headIdx) * nGroups * 8 + g * DCHUNKS + c) * 64,
-            overaligned_tag<16>{});
-        c64 = dpas8x8<bf16>(c64, braw, a);
+    // ── 质心分数：查询块 colmean（log2 域）转线性域写 pChunk（每行共享）──
+    {
+      const float* cp = colmean +
+          (static_cast<size_t>(headIdx) * qBlocks + qblock) * nPad + nBase;
+      simd<float, NCHUNK> svec_c = block_load<float, NCHUNK>(
+          cp, overaligned_tag<16>{}) * (1.0f / LOG2E);
+      simd_mask<NCHUNK> cmask;
+      for (int i = 0; i < NCHUNK; i++) {
+        cmask[i] = (nBase + i) >= static_cast<int>(nBlocks);
       }
-      const int colBase = ng * 8;
-      const int pg = ng / 2;
-      const int posBase = (ng % 2) * 8;
+      svec_c.merge(-1.0e30f, cmask);
+      simd<bf16, NCHUNK> cph = convert<bf16>(svec_c);
 #pragma unroll
       for (int r = 0; r < RPT; r++) {
-        simd<float, 8> s8 = c64.template select<8, 1>(r * 8) * SCALE;
-        simd_mask<8> cmask;
-        for (int i = 0; i < 8; i++) {
-          cmask[i] = (nBase + colBase + i) >= static_cast<int>(nBlocks);
+        for (int p = 0; p < PGCH; p++) {
+          pChunkAll.template select<16, 1>(p * RPT * 16 + r * 16) =
+              cph.template select<16, 1>(p * 16);
         }
-        s8.merge(-1.0e30f, cmask);
-        simd<bf16, 8> ph = convert<bf16>(s8);
-        pChunkAll.template select<8, 1>(pg * RPT * 16 + r * 16 + posBase) = ph;
       }
     }
 
@@ -450,7 +436,7 @@ extern "C" ESIMD_KERNEL_API void sol_attn_pack_vc(
 
 extern "C" ESIMD_KERNEL_API void sol_attn_summary(
     void* sycl_queue_ptr,
-    void* packed_q, void* packed_kc, void* packed_vc,
+    void* colmean, void* packed_vc,
     void* routes,
     void* out_m, void* out_l, void* out_acc,
     int q_len, int kv_len, int heads, int n_blocks, int q_blocks, int n_pad) {
@@ -462,8 +448,7 @@ extern "C" ESIMD_KERNEL_API void sol_attn_summary(
             {(size_t)(sol_sum::WG * heads * qTiles)}, {(size_t)sol_sum::WG}),
         [=](sycl::nd_item<1> ndi) SYCL_ESIMD_KERNEL {
           sol_sum::summaryDg2(
-              static_cast<const uint8_t*>(packed_q),
-              static_cast<const uint8_t*>(packed_kc),
+              static_cast<const float*>(colmean),
               static_cast<const uint8_t*>(packed_vc),
               static_cast<const uint8_t*>(routes),
               static_cast<float*>(out_m), static_cast<float*>(out_l),

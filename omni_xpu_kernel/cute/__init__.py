@@ -158,10 +158,12 @@ def supports_sol_attn() -> bool:
         return False
 
 
-def _sol_attn_prepare(q, k, v, scale, tau, sink_blocks, sink_q):
-    """路由准备：返回 (kc, vc, routes)。
+def _sol_attn_prepare(q, k, v, scale, tau, sink_blocks, sink_q,
+                      with_score=False):
+    """路由准备：返回 (kc, vc, routes[, score])。
     kc: [B,H,N,D] bf16 块均值；vc: [B,H,N,D] bf16 V 块和；
-    routes: [B,H,QN,N] uint8 精确掩码。语义与 CUDA Sol-Attn 一致。
+    routes: [B,H,QN,N] uint8 精确掩码；score: [B,H,QN,N] f32 查询块质心
+    分数（log2 域，centroid-tail 摘要用）。语义与 CUDA Sol-Attn 一致。
     """
     B, T, H, D = q.shape
     NB = (T + _SOL_ATTN_BLOCK - 1) // _SOL_ATTN_BLOCK
@@ -201,6 +203,8 @@ def _sol_attn_prepare(q, k, v, scale, tau, sink_blocks, sink_q):
         (qb[:, None] - qb[None, :]).abs()[None, None] <= 1)
     if sink_blocks[1] > sink_blocks[0]:
         routes[:, :, :, sink_blocks[0]:sink_blocks[1]] = True
+    if with_score:
+        return kc, vc, routes.to(torch.uint8), score.contiguous()
     return kc, vc, routes.to(torch.uint8)
 
 
@@ -239,15 +243,15 @@ def sol_attn(q, k, v, *, scale=None, tau=1.0,
     v = v.contiguous()
     B, T, H, D = q.shape
     NB = (T + _SOL_ATTN_BLOCK - 1) // _SOL_ATTN_BLOCK
-    kc, vc, routes = _sol_attn_prepare(
+    kc, vc, routes, colmean = _sol_attn_prepare(
         q, k, v, scale, float(tau),
         tuple(int(x) for x in sink_blocks),
-        tuple(int(x) for x in sink_q))
+        tuple(int(x) for x in sink_q), with_score=True)
     queue = torch.xpu.current_stream().sycl_queue
     try:
         # ── A770 两阶段路径：DPAS 摘要（近似块）+ FMA 精确（稀疏保留块）──
-        # 摘要：pack_q/pack_kc/pack_vc + summary，输出 m/l/acc（bf16 在线
-        # softmax 初始值）；精确：per-qblock CSR + init 合并，输出最终结果。
+        # 摘要：colmean（查询块质心分数）+ pack_vc + summary，输出 m/l/acc
+        # （bf16 在线 softmax 初始值）；精确：per-qblock CSR + init 合并。
         sum_lib = _sol_attn_sum_library()
         exact_lib = _sol_attn_exact_library()
     except Exception:
@@ -263,33 +267,22 @@ def sol_attn(q, k, v, *, scale=None, tau=1.0,
         routes_p = torch.nn.functional.pad(
             routes, (0, n_pad - NB, 0, qn_pad - routes.shape[2])
         ).contiguous()
-        packed_q = torch.empty(H * q_tiles * 32 * 8 * 128,
-                               device=q.device, dtype=torch.bfloat16)
-        n_groups = n_pad // 8
         pg_total = n_pad // 16
-        packed_kc = torch.empty(H * n_groups * 8 * 64, device=q.device,
-                                dtype=torch.int32)
         packed_vc = torch.empty(H * pg_total * 8 * 2 * 64,
                                 device=q.device, dtype=torch.int32)
+        colmean_p = torch.nn.functional.pad(
+            colmean, (0, n_pad - NB, 0, qn_pad - colmean.shape[2])
+        ).contiguous()
         m = torch.empty(T, H, device=q.device, dtype=torch.float32)
         l = torch.empty(T, H, device=q.device, dtype=torch.float32)
         acc = torch.empty(T, H, 128, device=q.device, dtype=torch.bfloat16)
-        sum_lib.sol_attn_pack_q(
-            ctypes.c_void_p(queue), ctypes.c_void_p(q.data_ptr()),
-            ctypes.c_void_p(packed_q.data_ptr()),
-            ctypes.c_int(T), ctypes.c_int(H))
-        sum_lib.sol_attn_pack_kc(
-            ctypes.c_void_p(queue), ctypes.c_void_p(kc_p.data_ptr()),
-            ctypes.c_void_p(packed_kc.data_ptr()),
-            ctypes.c_int(H), ctypes.c_int(n_groups))
         sum_lib.sol_attn_pack_vc(
             ctypes.c_void_p(queue), ctypes.c_void_p(vc_p.data_ptr()),
             ctypes.c_void_p(packed_vc.data_ptr()),
             ctypes.c_int(H), ctypes.c_int(pg_total))
         sum_lib.sol_attn_summary(
             ctypes.c_void_p(queue),
-            ctypes.c_void_p(packed_q.data_ptr()),
-            ctypes.c_void_p(packed_kc.data_ptr()),
+            ctypes.c_void_p(colmean_p.data_ptr()),
             ctypes.c_void_p(packed_vc.data_ptr()),
             ctypes.c_void_p(routes_p.data_ptr()),
             ctypes.c_void_p(m.data_ptr()), ctypes.c_void_p(l.data_ptr()),
