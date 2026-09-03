@@ -51,7 +51,8 @@ XPU_ARCH_MACRO = XPU_ARCH_MACROS[BUILD_XPU_TARGET]
 # oneDNN development runtime for the Windows DG2 compatibility build.
 VALIDATED_ONEDNN_VERSION = (
     (3, 11, 2)
-    if IS_WINDOWS and BUILD_XPU_TARGET == "dg2" and BUILD_TORCH_VERSION.startswith("2.13.")
+    if IS_WINDOWS and BUILD_XPU_TARGET == "dg2"
+    and BUILD_TORCH_VERSION.startswith(("2.13.", "2.14."))
     else (3, 9, 1)
 )
 
@@ -689,7 +690,7 @@ class ICPXBuildExt(build_ext):
                     "-Xs", f"-device {BUILD_XPU_TARGET} -options -doubleGRF",
                     "/O2", "/DNDEBUG",
                     "/EHsc",
-                    "/std:c++17",
+                    "/std:c++20",
                     "/DNOMINMAX",
                     "/DWIN32_LEAN_AND_MEAN",
                     "-DBUILD_ESIMD_KERNEL_LIB",
@@ -714,7 +715,7 @@ class ICPXBuildExt(build_ext):
                     "/DNOMINMAX",
                     "/DWIN32_LEAN_AND_MEAN",
                     "/EHsc",  # Enable C++ exception handling
-                    "/std:c++17",
+                    "/std:c++20",
                 ]
                 # PyTorch XPU wheels also bundle oneDNN headers. Keep the
                 # headers selected with the external oneDNN library first so
@@ -790,7 +791,7 @@ class ICPXBuildExt(build_ext):
                     )
                     cute_overlay_flags.append(f"-I{overlay}")
                 cmd += [
-                    "-std=c++17", "-O3", "-DNDEBUG", "-fPIC", "-shared",
+                    "-std=c++20", "-O3", "-DNDEBUG", "-fPIC", "-shared",
                     "-fsycl-targets=spir64_gen",
                     "-Xsycl-target-backend", f"-device {BUILD_XPU_TARGET}",
                     "-Xspirv-translator",
@@ -831,7 +832,7 @@ class ICPXBuildExt(build_ext):
                     "-O3", "-DNDEBUG",
                     f"-D{XPU_ARCH_MACRO}=1",
                     "-fPIC", "-shared",
-                    "-std=c++17",
+                    "-std=c++20",
                 ]
                 # torch/include contains another oneDNN header tree. Put the
                 # explicitly selected installation first so it matches -ldnnl.
