@@ -46,14 +46,20 @@ XPU_ARCH_MACROS = {
 }
 XPU_ARCH_MACRO = XPU_ARCH_MACROS[BUILD_XPU_TARGET]
 
-# Torch 2.13 XPU uses the oneAPI 2026 SYCL ABI. Keep upstream's validated
+# Torch 2.13/2.14 XPU uses the oneAPI 2026 SYCL ABI. Keep upstream's validated
 # oneDNN 3.9.1 contract everywhere else, while selecting the matched 2026
 # oneDNN development runtime for the Windows DG2 compatibility build.
 VALIDATED_ONEDNN_VERSION = (
     (3, 11, 2)
-    if IS_WINDOWS and BUILD_XPU_TARGET == "dg2" and BUILD_TORCH_VERSION.startswith("2.13.")
+    if IS_WINDOWS and BUILD_XPU_TARGET == "dg2"
+    and BUILD_TORCH_VERSION.startswith(("2.13.", "2.14."))
     else (3, 9, 1)
 )
+
+# PyTorch 2.14+ headers require C++20; older versions remain on validated C++17.
+is_torch_214_or_newer = BUILD_TORCH_VERSION.startswith("2.14.")
+CPP_STD_MSVC = "/std:c++20" if is_torch_214_or_newer else "/std:c++17"
+CPP_STD_POSIX = "-std=c++20" if is_torch_214_or_newer else "-std=c++17"
 
 BMG_CUTE_REMAINDER_MASK_ORIGINAL = """\
           FragSRow k_rem_mask;
@@ -689,7 +695,7 @@ class ICPXBuildExt(build_ext):
                     "-Xs", f"-device {BUILD_XPU_TARGET} -options -doubleGRF",
                     "/O2", "/DNDEBUG",
                     "/EHsc",
-                    "/std:c++17",
+                    CPP_STD_MSVC,
                     "/DNOMINMAX",
                     "/DWIN32_LEAN_AND_MEAN",
                     "-DBUILD_ESIMD_KERNEL_LIB",
@@ -714,7 +720,7 @@ class ICPXBuildExt(build_ext):
                     "/DNOMINMAX",
                     "/DWIN32_LEAN_AND_MEAN",
                     "/EHsc",  # Enable C++ exception handling
-                    "/std:c++17",
+                    CPP_STD_MSVC,
                 ]
                 # PyTorch XPU wheels also bundle oneDNN headers. Keep the
                 # headers selected with the external oneDNN library first so
@@ -790,7 +796,7 @@ class ICPXBuildExt(build_ext):
                     )
                     cute_overlay_flags.append(f"-I{overlay}")
                 cmd += [
-                    "-std=c++17", "-O3", "-DNDEBUG", "-fPIC", "-shared",
+                    CPP_STD_POSIX, "-O3", "-DNDEBUG", "-fPIC", "-shared",
                     "-fsycl-targets=spir64_gen",
                     "-Xsycl-target-backend", f"-device {BUILD_XPU_TARGET}",
                     "-Xspirv-translator",
@@ -831,7 +837,7 @@ class ICPXBuildExt(build_ext):
                     "-O3", "-DNDEBUG",
                     f"-D{XPU_ARCH_MACRO}=1",
                     "-fPIC", "-shared",
-                    "-std=c++17",
+                    CPP_STD_POSIX,
                 ]
                 # torch/include contains another oneDNN header tree. Put the
                 # explicitly selected installation first so it matches -ldnnl.

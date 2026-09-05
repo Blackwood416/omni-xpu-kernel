@@ -16,7 +16,7 @@ VERSION_FILE = PROJECT_ROOT / "omni_xpu_kernel" / "_version.py"
 PYPROJECT_FILE = PROJECT_ROOT / "pyproject.toml"
 IMAGE_VERSION = "0.2.0-b1"
 BASE_VERSION = "0.2.0b1"
-SUPPORTED_TORCH_MINORS = ("2.10", "2.11", "2.12", "2.13")
+SUPPORTED_TORCH_MINORS = ("2.10", "2.11", "2.12", "2.13", "2.14")
 SUPPORTED_XPU_TARGETS = ("bmg", "ptl-h", "dg2")
 VERSION_NAMESPACE = run_path(str(VERSION_FILE))
 TORCH_VERSION = VERSION_NAMESPACE["get_installed_torch_version"]()
@@ -86,6 +86,7 @@ def test_kernel_version_is_exposed_by_package_metadata():
         ("2.12.0+xpu", "2.12.0", "2.12", "torch212"),
         ("2.12.1+xpu", "2.12.1", "2.12", "torch212"),
         ("2.13.0+xpu", "2.13.0", "2.13", "torch213"),
+        ("2.14.0+xpu", "2.14.0", "2.14", "torch214"),
     ],
 )
 def test_supported_torch_minors_select_distinct_wheel_tags(
@@ -164,7 +165,7 @@ def test_inconsistent_installed_wheel_metadata_is_rejected(monkeypatch, tmp_path
         get_build_info(packaged_version_file)
 
 
-@pytest.mark.parametrize("torch_version", ["2.9.1+xpu", "2.14.0+xpu", "invalid"])
+@pytest.mark.parametrize("torch_version", ["2.9.1+xpu", "2.15.0+xpu", "invalid"])
 def test_unsupported_torch_versions_are_rejected(torch_version):
     with pytest.raises(RuntimeError, match="Torch minor|Unsupported Torch version"):
         VERSION_NAMESPACE["get_torch_minor"](torch_version)
