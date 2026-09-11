@@ -57,6 +57,21 @@ def tensorwise_scaled(x, scale, stochastic_rounding=0):
     return tensorwise(x, stochastic_rounding)[0]
 
 
+def tensorwise_with_scale(x, scale=None, stochastic_rounding=0):
+    """Tensorwise INT8 quantize that accepts a pre-computed scale (A-series API).
+
+    Keeps the upstream ``tensorwise`` return contract (quantized tensor plus a
+    scalar FP32 scale) while matching the three-argument public signature.
+    """
+    q = (torch.empty_like(x, dtype=torch.int8) if stochastic_rounding > 0
+         else x.new_empty(x.shape, dtype=torch.int8))
+    if scale is None:
+        s = x.new_empty((), dtype=torch.float32)
+    else:
+        s = scale.new_empty(scale.shape, dtype=torch.float32)
+    return q, s
+
+
 def int8_dequantize(q, scale):
     return q.new_empty(torch.broadcast_shapes(q.shape, scale.shape), dtype=torch.float32)
 
