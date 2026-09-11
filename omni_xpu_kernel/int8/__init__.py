@@ -866,7 +866,37 @@ def _quantize_krea2_int8_convrot(
 # =============================================================================
 
 
-@compile_op("quantize_int8_tensorwise", _meta.tensorwise_with_scale)
+@compile_op("quantize_int8_tensorwise", _meta.tensorwise)
+def _quantize_tensorwise(
+    x: torch.Tensor, stochastic_rounding: int = 0
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compile-side entry point: no pre-computed scale (upstream contract)."""
+    native = _get_native()
+    if native is not None and hasattr(native, "quantize_int8_tensorwise"):
+        return native.quantize_int8_tensorwise(x, None, stochastic_rounding)
+    return _ref_quantize_int8_tensorwise(x, None, stochastic_rounding)
+
+
+@compile_op("quantize_int8_tensorwise_scaled", _meta.tensorwise_scaled)
+def _quantize_tensorwise_scaled(
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    stochastic_rounding: int = 0,
+) -> torch.Tensor:
+    """Compile-side entry point with a caller-provided scale.
+
+    Returns only the quantized tensor: the public wrapper keeps ownership of the
+    FP32 output scale so the custom op never aliases its own input.
+    """
+    native = _get_native()
+    if native is not None and hasattr(native, "quantize_int8_tensorwise"):
+        quantized, _ = native.quantize_int8_tensorwise(
+            x, scale, stochastic_rounding
+        )
+        return quantized
+    return _ref_quantize_int8_tensorwise(x, scale, stochastic_rounding)[0]
+
+
 def quantize_int8_tensorwise(
     x: torch.Tensor,
     scale: Optional[torch.Tensor] = None,
@@ -885,7 +915,21 @@ def quantize_int8_tensorwise(
             - scale: Scalar float32 tensor
     """
     if torch.compiler.is_compiling():
-        return torch.ops.omni_xpu.quantize_int8_tensorwise(x, scale, stochastic_rounding)
+        if scale is None:
+            return torch.ops.omni_xpu.quantize_int8_tensorwise(
+                x, stochastic_rounding
+            )
+        output_scale = scale.to(device=x.device, dtype=torch.float32)
+        if stochastic_rounding <= 0 and x.dtype in (
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+        ):
+            output_scale = output_scale.contiguous()
+        quantized = torch.ops.omni_xpu.quantize_int8_tensorwise_scaled(
+            x, output_scale, stochastic_rounding
+        )
+        return quantized, output_scale
     native = _get_native()
     if native is not None and hasattr(native, "quantize_int8_tensorwise"):
         return native.quantize_int8_tensorwise(x, scale, stochastic_rounding)

@@ -165,7 +165,7 @@ def layer_norm(
     return _get_native().layer_norm(input.contiguous(), weight, bias, eps)
 
 
-@compile_op("fused_add_rms_norm", _meta.void)
+@compile_op("fused_add_rms_norm", _meta.void, mutates_args=("input", "residual"))
 def fused_add_rms_norm(
     input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6
 ) -> None:

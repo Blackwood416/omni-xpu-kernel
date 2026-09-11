@@ -197,7 +197,7 @@ def onednn_int4_gemm_add_to_output(
     _get_native().onednn_int4_gemm_add_to_output(act, packed_u4, scales_f16, dst)
 
 
-@compile_op("svdq_fused_convert_add", _meta.void)
+@compile_op("svdq_fused_convert_add", _meta.void, mutates_args=("out",))
 def fused_convert_add(
     out: torch.Tensor,
     result: torch.Tensor,
