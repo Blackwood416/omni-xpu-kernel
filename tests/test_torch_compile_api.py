@@ -45,6 +45,22 @@ APIS = {
 }
 API_NAMES = tuple(f"{module}.{name}" for module, names in APIS.items() for name in names)
 
+# ── A-series (DG2) adaptation ────────────────────────────────────────────────
+# The A-series Windows/DG2 wheel intentionally does not build the CUTE /
+# CUTLASS-SYCL FMHA sidecar (see WHL_BUILD_INSTALL.md), and
+# rms_norm_segmented_modulation is an upstream-only operator. Skip exactly
+# those entries so the remaining suite still asserts the full contract.
+A_SERIES_EXCLUDED = {"norm.rms_norm_segmented_modulation"}
+if not cute.is_available():
+    A_SERIES_EXCLUDED |= {f"cute.{name}" for name in APIS["cute"]}
+
+# Public A-series operators that upstream does not expose.
+A_SERIES_EXTRA = {
+    "int8": ("quantize_int8_convrot_fused",),
+    "svdq": ("onednn_int4_gemm_torchao", "onednn_s8u4_gemm", "quantize_act_s8"),
+    "sdp": ("sdp_bhld", "clear_cache"),
+}
+
 
 def _rand(shape, dtype=torch.bfloat16):
     return torch.randn(shape, device="xpu", dtype=dtype) * 0.25
@@ -71,6 +87,8 @@ def _gguf_bytes(format, blocks=3):
 
 
 def case(api, *, dtype=torch.bfloat16, rows=3):
+    if api in A_SERIES_EXCLUDED:
+        pytest.skip(f"{api} is not part of the A-series (DG2) wheel")
     module, name = api.split(".")
     function = getattr(importlib.import_module("omni_xpu_kernel." + module), name)
     if module == "gguf":
@@ -249,8 +267,19 @@ def test_public_tensor_inventory_has_no_unclassified_api():
             if not isinstance(f, ast.FunctionDef) or f.name.startswith("_"):continue
             if f.name.startswith("supports_") or f.name.endswith("_supported") or f.name == "is_available" or "_cache_" in f.name:continue
             actual.add(module + "." + f.name)
-    assert actual == set(API_NAMES)
-    assert len(actual) == 75
+    # A-series: compare against the supported surface (upstream entries minus
+    # the ones this wheel does not build, plus the A-series-only operators).
+    expected = set(API_NAMES) - A_SERIES_EXCLUDED
+    expected |= {
+        f"{module}.{name}"
+        for module, names in A_SERIES_EXTRA.items()
+        for name in names
+    }
+    actual -= A_SERIES_EXCLUDED
+    assert actual == expected, (
+        f"unclassified={sorted(actual - expected)} "
+        f"missing={sorted(expected - actual)}"
+    )
 
 
 @pytest.mark.parametrize("api", API_NAMES)
@@ -352,7 +381,8 @@ OPERATOR_CASES = operator_cases()
 
 def test_every_dispatcher_boundary_has_a_native_fixture():
     from omni_xpu_kernel._compile_ops import _OPERATORS
-    assert set(OPERATOR_CASES) == set(_OPERATORS)
+    excluded = {n for n, api in OPERATOR_CASES.items() if api in A_SERIES_EXCLUDED}
+    assert set(OPERATOR_CASES) - excluded == set(_OPERATORS)
 
 
 @pytest.mark.parametrize("name", sorted(OPERATOR_CASES))
@@ -465,6 +495,8 @@ def test_rotary_packed_qkv_alias_and_partial_rotation(split, rms, inplace):
 
 @pytest.mark.parametrize("name", APIS["cute"])
 def test_cute_first_call_can_be_compiled_in_fresh_process(name):
+    if f"cute.{name}" in A_SERIES_EXCLUDED:
+        pytest.skip("CUTE sidecar is not built for the A-series (DG2) wheel")
     import os
     import subprocess
     import sys
@@ -510,6 +542,8 @@ def test_fp8_rounding_rng_is_an_explicit_runtime_tensor():
 
 @pytest.mark.parametrize("mode", ["float_bias", "bool_bias", "masked", "topk", "sinks", "tail_off", "block_len", "coarse_gate"])
 def test_sol_attention_runtime_controls(mode):
+    if "cute.sol_attn" in A_SERIES_EXCLUDED:
+        pytest.skip("Sol-Attn is not built for the A-series (DG2) wheel")
     q = _rand((1, 257, 1, 128))
     args = (q, torch.randn_like(q), torch.randn_like(q))
     options = {
