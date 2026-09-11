@@ -282,7 +282,7 @@ def prepare_onednn_weights(
     scales_f16 = wscales.to(torch.float16).contiguous()
     return packed_u4, scales_f16
 
-@compile_op("svdq_quantize_act_s8", _meta.svdq_quantize)
+@compile_op("svdq_quantize_act_s8", _meta.svdq_quantize_act_s8)
 def quantize_act_s8(
     input: torch.Tensor,
     group_size: int = 64,

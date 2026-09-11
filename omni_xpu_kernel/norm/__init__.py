@@ -17,7 +17,7 @@ Example:
 import torch
 
 from .. import _compile_meta as _meta
-from .._compile_ops import compile_op
+from .._compile_ops import compile_op, fake_layer_norm, fake_rms_norm
 from typing import Optional
 
 
@@ -82,6 +82,7 @@ def group_norm_seedvr_bmg(
     )
 
 
+@compile_op("rms_norm", fake_rms_norm)
 def rms_norm(
     weight: torch.Tensor, input: torch.Tensor, eps: float = 1e-6
 ) -> torch.Tensor:
@@ -106,6 +107,8 @@ def rms_norm(
           FP16 H120 support
         - Supports fp32, fp16, bf16
     """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.rms_norm(weight, input, eps)
     return _get_native().rms_norm(weight, input, eps)
 
 
@@ -136,6 +139,7 @@ def rms_norm_gate_residual(
     )
 
 
+@compile_op("layer_norm", fake_layer_norm)
 def layer_norm(
     input: torch.Tensor,
     weight: Optional[torch.Tensor] = None,
@@ -162,6 +166,8 @@ def layer_norm(
         - hidden_size must be <= 8192 and divisible by 32
         - Supports fp32, fp16, bf16
     """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.layer_norm(input, weight, bias, eps)
     return _get_native().layer_norm(input.contiguous(), weight, bias, eps)
 
 

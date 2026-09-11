@@ -122,6 +122,13 @@ def svdq_quantize(input, group_size=64):
             input.new_empty((width // group_size, rows)))
 
 
+def svdq_quantize_act_s8(input, group_size=64):
+    """A-series W4A8 activation quantizer: s8 [M, K] + per-group FP32 scales."""
+    rows, width = input.shape
+    return (input.new_empty((rows, width), dtype=torch.int8),
+            input.new_empty((rows, width // group_size), dtype=torch.float32))
+
+
 def svdq_gemm(act, packed, scales):
     return act.new_empty((act.shape[0], packed.shape[0]))
 
