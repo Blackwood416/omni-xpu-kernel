@@ -5,6 +5,9 @@ from pathlib import Path
 
 import torch
 
+from .. import _compile_meta as _meta
+from .._compile_ops import compile_op
+
 
 def _get_native():
     from .. import _load_extension
@@ -35,7 +38,10 @@ def is_available() -> bool:
     return bool(_sidecar_candidates_cached())
 
 
+@compile_op("sdp_sdp", _meta.unchanged, ordered=True)
 def sdp(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.sdp_sdp(q, k, v)
     if not _sidecar_candidates_cached():
         raise RuntimeError(
             "omni_xpu_kernel SDP sidecar is unavailable for this build; "
