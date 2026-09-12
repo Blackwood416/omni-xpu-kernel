@@ -15,6 +15,9 @@ Example:
 """
 
 import torch
+
+from .. import _compile_meta as _meta
+from .._compile_ops import compile_op, fake_layer_norm, fake_rms_norm
 from typing import Optional
 
 
@@ -42,6 +45,7 @@ def supports_group_norm_seedvr_bmg() -> bool:
     )
 
 
+@compile_op("group_norm_bmg", _meta.group_norm)
 def group_norm_bmg(
     input: torch.Tensor,
     num_groups: int,
@@ -55,11 +59,14 @@ def group_norm_bmg(
     captured ``[1,C,H,W]`` shapes, 32 groups, affine BF16 parameters, and
     ``eps=1e-6``. Callers must retain their normal fallback for other inputs.
     """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.group_norm_bmg(input, num_groups, weight, bias, eps)
     return _get_native().group_norm_bmg(
         input, num_groups, weight, bias, eps
     )
 
 
+@compile_op("group_norm_seedvr_bmg", _meta.group_norm)
 def group_norm_seedvr_bmg(
     input: torch.Tensor,
     num_groups: int,
@@ -68,11 +75,14 @@ def group_norm_seedvr_bmg(
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """Run validated SeedVR2 temporal-interleaved FP16 GroupNorm contracts."""
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.group_norm_seedvr_bmg(input, num_groups, weight, bias, eps)
     return _get_native().group_norm_seedvr_bmg(
         input, num_groups, weight, bias, eps
     )
 
 
+@compile_op("rms_norm", fake_rms_norm)
 def rms_norm(
     weight: torch.Tensor, input: torch.Tensor, eps: float = 1e-6
 ) -> torch.Tensor:
@@ -97,9 +107,12 @@ def rms_norm(
           FP16 H120 support
         - Supports fp32, fp16, bf16
     """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.rms_norm(weight, input, eps)
     return _get_native().rms_norm(weight, input, eps)
 
 
+@compile_op("rms_norm_gate_residual", _meta.norm_gate)
 def rms_norm_gate_residual(
     weight: torch.Tensor,
     input: torch.Tensor,
@@ -114,6 +127,8 @@ def rms_norm_gate_residual(
     route accepts contiguous BF16 ``input``/``residual`` tensors shaped
     ``[M, 3840]`` for M=64, 1024, or 1088, plus 1D weight/gate tensors.
     """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.rms_norm_gate_residual(weight, input, gate, residual, eps)
     native = _get_native()
     if not hasattr(native, "rms_norm_gate_residual"):
         raise RuntimeError(
@@ -124,6 +139,7 @@ def rms_norm_gate_residual(
     )
 
 
+@compile_op("layer_norm", fake_layer_norm)
 def layer_norm(
     input: torch.Tensor,
     weight: Optional[torch.Tensor] = None,
@@ -150,9 +166,12 @@ def layer_norm(
         - hidden_size must be <= 8192 and divisible by 32
         - Supports fp32, fp16, bf16
     """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.layer_norm(input, weight, bias, eps)
     return _get_native().layer_norm(input.contiguous(), weight, bias, eps)
 
 
+@compile_op("fused_add_rms_norm", _meta.void, mutates_args=("input", "residual"))
 def fused_add_rms_norm(
     input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6
 ) -> None:
@@ -180,9 +199,12 @@ def fused_add_rms_norm(
         - hidden_size must be <= 8192 and divisible by 32
         - Supports fp32, fp16, bf16
     """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.fused_add_rms_norm(input, residual, weight, eps)
     _get_native().fused_add_rms_norm(input, residual, weight, eps)
 
 
+@compile_op("fused_rms_norm_linear", _meta.norm_projection)
 def fused_rms_norm_linear(
     input: torch.Tensor,
     norm_weight: torch.Tensor,
@@ -204,9 +226,12 @@ def fused_rms_norm_linear(
     Returns:
         [M, N] projected output
     """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.fused_rms_norm_linear(input, norm_weight, proj_weight, eps)
     return _get_native().fused_rms_norm_linear(input, norm_weight, proj_weight, eps)
 
 
+@compile_op("fused_adaln", _meta.unchanged)
 def fused_adaln(
     input: torch.Tensor,
     scale: torch.Tensor,
@@ -215,9 +240,12 @@ def fused_adaln(
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """Fuse LayerNorm and AdaLN modulation into one ESIMD kernel."""
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.fused_adaln(input, scale, shift, row_repeat, eps)
     return _get_native().fused_adaln(input, scale, shift, row_repeat, eps)
 
 
+@compile_op("fused_rms_adaln", _meta.unchanged)
 def fused_rms_adaln(
     input: torch.Tensor,
     scale: torch.Tensor,
@@ -226,6 +254,8 @@ def fused_rms_adaln(
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """Fuse RMSNorm and AdaLN modulation into one ESIMD kernel."""
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.fused_rms_adaln(input, scale, shift, row_repeat, eps)
     return _get_native().fused_rms_adaln(input, scale, shift, row_repeat, eps)
 
 
