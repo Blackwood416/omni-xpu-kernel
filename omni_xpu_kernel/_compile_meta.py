@@ -137,6 +137,22 @@ def svdq_gemm(act, packed, scales):
     return act.new_empty((act.shape[0], packed.shape[0]))
 
 
+def svdq_gemm_torchao(act, packed_u4, zp_u8, scales_f16):
+    """torchao-format asymmetric INT4: [N, K/2] packed u4 + per-block zp."""
+    return act.new_empty(
+        (act.shape[0], packed_u4.shape[0]), dtype=act.dtype
+    )
+
+
+def svdq_gemm_s8u4(
+    act, xscales, packed_u4, scales_f16, out_dtype=torch.bfloat16, zp_u8=None
+):
+    """W4A8 (s8 activation x u4 weight) GEMM; native accumulates in fp32."""
+    return act.new_empty(
+        (act.shape[0], packed_u4.shape[0]), dtype=out_dtype
+    )
+
+
 def svdq_smooth(x, factor):
     return x.new_empty(x.shape, dtype=torch.float16)
 

@@ -45,6 +45,59 @@ def supports_group_norm_seedvr_bmg() -> bool:
     )
 
 
+def supports_rms_norm_segmented_modulation() -> bool:
+    """Return whether the native binary contains segmented RMS modulation."""
+    return bool(
+        getattr(
+            _get_native(),
+            "__rms_norm_segmented_modulation__",
+            False,
+        )
+    )
+
+
+def rms_norm_segmented_modulation_supported(input: torch.Tensor) -> bool:
+    """Return whether native policy selects the route for ``input``."""
+    if not supports_rms_norm_segmented_modulation():
+        return False
+    try:
+        return bool(
+            _get_native().rms_norm_segmented_modulation_supported(input)
+        )
+    except (RuntimeError, TypeError):
+        return False
+
+
+@compile_op("rms_norm_segmented_modulation", _meta.norm_segmented)
+def rms_norm_segmented_modulation(
+    weight: torch.Tensor,
+    input: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    starts: list[int],
+    stops: list[int],
+    modulation_rows: list[int],
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """RMSNorm over one packed stream plus ordered segmented scale/shift.
+
+    MiniMax H3 normalizes the whole stream with a single H5376 reduction and
+    then applies one modulation row to each ordered contiguous segment, with
+    the BF16 materialisation boundaries of the eager reference. ``starts`` /
+    ``stops`` / ``modulation_rows`` must be matched, contiguous and cover
+    every input row (at most eight segments).
+    """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.rms_norm_segmented_modulation(
+            weight, input, scale, shift,
+            list(starts), list(stops), list(modulation_rows), eps,
+        )
+    return _get_native().rms_norm_segmented_modulation(
+        weight, input, scale, shift,
+        list(starts), list(stops), list(modulation_rows), eps,
+    )
+
+
 @compile_op("group_norm_bmg", _meta.group_norm)
 def group_norm_bmg(
     input: torch.Tensor,
@@ -262,6 +315,8 @@ def fused_rms_adaln(
 __all__ = [
     "group_norm_bmg",
     "group_norm_seedvr_bmg",
+    "rms_norm_segmented_modulation",
+    "rms_norm_segmented_modulation_supported",
     "rms_norm",
     "rms_norm_gate_residual",
     "layer_norm",
@@ -271,4 +326,5 @@ __all__ = [
     "fused_rms_adaln",
     "supports_group_norm_bmg",
     "supports_group_norm_seedvr_bmg",
+    "supports_rms_norm_segmented_modulation",
 ]

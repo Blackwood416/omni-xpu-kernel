@@ -48,12 +48,10 @@ API_NAMES = tuple(f"{module}.{name}" for module, names in APIS.items() for name 
 
 # ── A-series (DG2) adaptation ────────────────────────────────────────────────
 # The A-series Windows/DG2 wheel intentionally does not build the CUTE /
-# CUTLASS-SYCL FMHA sidecar (see WHL_BUILD_INSTALL.md), and
-# rms_norm_segmented_modulation is an upstream-only operator. Skip exactly
-# those entries so the remaining suite still asserts the full contract.
+# CUTLASS-SYCL FMHA sidecar (see WHL_BUILD_INSTALL.md). Skip exactly those
+# entries so the remaining suite still asserts the full contract;
+# rms_norm_segmented_modulation is now built for DG2 as well.
 A_SERIES_EXCLUDED = {
-    # Upstream-only operator.
-    "norm.rms_norm_segmented_modulation",
     # The DG2 build has no native group_norm_bmg symbol (BMG-only op) and the
     # direct LTX split-half RoPE explicitly raises outside a BMG core.
     "norm.group_norm_bmg",
@@ -74,7 +72,6 @@ A_SERIES_EXTRA = {
 # so both sides must drop the same set.
 A_SERIES_EXCLUDED_OPS = {
     "group_norm_bmg",
-    "rms_norm_segmented_modulation",
     "rotary_apply_ltx_split_rope_direct",
     "cute_sol_attn",
 }
@@ -142,6 +139,20 @@ def case(api, *, dtype=torch.bfloat16, rows=3):
             return function, (packed, scales), {}
         if name == "onednn_int4_gemm":
             return function, (x, packed, scales), {}
+        if name == "onednn_int4_gemm_torchao":
+            # torchao asymmetric contract: raw u4 qdata + per-block zero points.
+            prepared, scale_half = svdq.prepare_onednn_weights(packed, scales)
+            zp = torch.zeros((2, 32), device="xpu", dtype=torch.uint8)
+            return function, (
+                x.to(torch.float16), prepared, zp, scale_half,
+            ), {}
+        if name == "onednn_s8u4_gemm":
+            prepared, scale_half = svdq.prepare_onednn_weights(packed, scales)
+            # packed is [N, K/2] with K = 128; scales_f16 has two groups, so
+            # the s8 activation carries K/group_size = 2 scales per row.
+            act_s8 = torch.zeros((rows, 128), device="xpu", dtype=torch.int8)
+            xscales = torch.full((rows, 2), 0.5, device="xpu", dtype=torch.float32)
+            return function, (act_s8, xscales, prepared, scale_half), {}
         if name.startswith("onednn_int4_gemm"):
             prepared, scale_half = svdq.prepare_onednn_weights(packed, scales)
             args = (x.to(torch.float16), prepared, scale_half)
@@ -168,7 +179,10 @@ def case(api, *, dtype=torch.bfloat16, rows=3):
             x = _rand((17, 5376))
             packed = _rand((3, 6 * 5376))
             shift, scale, *_ = packed.chunk(6, dim=-1)
-            return function, (_rand((5376,)), x, scale, shift, [(0, 3, 0), (3, 8, 1), (8, 17, 2)]), {}
+            return function, (
+                _rand((5376,)), x, scale, shift,
+                [0, 3, 8], [3, 8, 17], [0, 1, 2],
+            ), {}
         if name == "group_norm_bmg":x = _rand((1, 512, 128, 128))
         else:x = _rand((1, 512, 2, 128, 128), torch.float16).transpose(1, 2).reshape(2, 512, 128, 128)
         return function, (x, 32, _rand((512,), x.dtype), _rand((512,), x.dtype)), {}
@@ -417,8 +431,6 @@ def test_dispatcher_schema_fake_and_aot_contract(name, record_property, monkeypa
         pytest.skip("native PTL-H operation unavailable on admitted B70; error covered separately")
     if name == "quantize_int8_tensorwise_scaled":
         args += (torch.tensor(0.125, device="xpu"),)
-    elif name == "rms_norm_segmented_modulation":
-        args = args[:-1] + tuple(list(values) for values in zip(*args[-1]))
     elif name.startswith("rotary_rms_rope"):
         if "rope1" not in name:args += (args[-1],)
         args += (1e-6, False, 0)
