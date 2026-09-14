@@ -45,6 +45,12 @@ namespace norm {
     torch::Tensor group_norm_seedvr_bmg(
         torch::Tensor input, int64_t groups, torch::Tensor weight,
         torch::Tensor bias, double eps);
+    bool rms_norm_segmented_modulation_supported(torch::Tensor input);
+    torch::Tensor rms_norm_segmented_modulation(
+        torch::Tensor weight, torch::Tensor input, torch::Tensor scale,
+        torch::Tensor shift, const std::vector<int64_t>& starts,
+        const std::vector<int64_t>& stops,
+        const std::vector<int64_t>& modulation_rows, double eps);
 #endif
 #if defined(OMNI_XPU_ARCH_PTL_H)
     torch::Tensor rms_norm_gate_residual(
@@ -373,8 +379,22 @@ PYBIND11_MODULE(_C, m) {
         "BMG GroupNorm for validated SeedVR2 temporal-interleaved activations",
         py::arg("input"), py::arg("groups"), py::arg("weight"),
         py::arg("bias"), py::arg("eps") = 1e-6);
+    norm.attr("__rms_norm_segmented_modulation__") = true;
+    norm.def(
+        "rms_norm_segmented_modulation_supported",
+        &omni_xpu::norm::rms_norm_segmented_modulation_supported,
+        "Whether native policy enables segmented RMSNorm modulation",
+        py::arg("input"));
+    norm.def(
+        "rms_norm_segmented_modulation",
+        &omni_xpu::norm::rms_norm_segmented_modulation,
+        "RMSNorm plus ordered segmented BF16 scale/shift modulation",
+        py::arg("weight"), py::arg("input"), py::arg("scale"),
+        py::arg("shift"), py::arg("starts"), py::arg("stops"),
+        py::arg("modulation_rows"), py::arg("eps") = 1e-6);
 #else
     norm.attr("__group_norm_seedvr_bmg__") = false;
+    norm.attr("__rms_norm_segmented_modulation__") = false;
 #endif
 
 #if defined(OMNI_XPU_ARCH_PTL_H)

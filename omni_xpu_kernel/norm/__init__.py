@@ -18,7 +18,7 @@ import torch
 
 from .. import _compile_meta as _meta
 from .._compile_ops import compile_op, fake_layer_norm, fake_rms_norm
-from typing import Optional
+from typing import List, Optional, Sequence
 
 
 def _get_native():
@@ -42,6 +42,91 @@ def supports_group_norm_seedvr_bmg() -> bool:
     """Return whether the native binary contains the SeedVR BMG route."""
     return bool(
         getattr(_get_native(), "__group_norm_seedvr_bmg__", False)
+    )
+
+
+def supports_rms_norm_segmented_modulation() -> bool:
+    """Return whether the native binary contains segmented RMS modulation."""
+    return bool(
+        getattr(
+            _get_native(),
+            "__rms_norm_segmented_modulation__",
+            False,
+        )
+    )
+
+
+def rms_norm_segmented_modulation_supported(input: torch.Tensor) -> bool:
+    """Return whether native policy selects the route for ``input``."""
+    if not supports_rms_norm_segmented_modulation():
+        return False
+    try:
+        return bool(
+            _get_native().rms_norm_segmented_modulation_supported(input)
+        )
+    except (RuntimeError, TypeError):
+        return False
+
+
+@compile_op("rms_norm_segmented_modulation", _meta.norm_segmented)
+def _segmented_modulation(
+    weight: torch.Tensor,
+    input: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    starts: List[int],
+    stops: List[int],
+    rows: List[int],
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    return _get_native().rms_norm_segmented_modulation(
+        weight, input, scale, shift, starts, stops, rows, eps
+    )
+
+
+def rms_norm_segmented_modulation(
+    weight: torch.Tensor,
+    input: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    segments: Sequence[tuple[int, int, int]],
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Fuse RMSNorm and ordered segmented scale/shift modulation.
+
+    Preserves BF16 materialization after RMSNorm, ``1 + scale``,
+    multiplication, and shift addition. ``segments`` must contain ordered
+    contiguous ``(start, stop, modulation_row)`` integer triples that cover the
+    complete contiguous BF16 ``[S, 5376]`` input; the shipped kernel accepts up
+    to 32 of them (upstream caps at eight, reference-video H3 packs more).
+    """
+    starts = []
+    stops = []
+    modulation_rows = []
+    for segment in segments:
+        if not isinstance(segment, (tuple, list)) or len(segment) != 3:
+            raise TypeError(
+                "segments must contain (start, stop, modulation_row) triples"
+            )
+        if any(type(value) is not int for value in segment):
+            raise TypeError("segment values must be Python integers")
+        start, stop, modulation_row = segment
+        starts.append(start)
+        stops.append(stop)
+        modulation_rows.append(modulation_row)
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.rms_norm_segmented_modulation(
+            weight, input, scale, shift, starts, stops, modulation_rows, eps
+        )
+    return _get_native().rms_norm_segmented_modulation(
+        weight,
+        input,
+        scale,
+        shift,
+        starts,
+        stops,
+        modulation_rows,
+        eps,
     )
 
 
@@ -262,6 +347,8 @@ def fused_rms_adaln(
 __all__ = [
     "group_norm_bmg",
     "group_norm_seedvr_bmg",
+    "rms_norm_segmented_modulation",
+    "rms_norm_segmented_modulation_supported",
     "rms_norm",
     "rms_norm_gate_residual",
     "layer_norm",
@@ -271,4 +358,5 @@ __all__ = [
     "fused_rms_adaln",
     "supports_group_norm_bmg",
     "supports_group_norm_seedvr_bmg",
+    "supports_rms_norm_segmented_modulation",
 ]
