@@ -498,7 +498,11 @@ struct H3SegmentedRmsModulationConfig {
     static constexpr int HiddenSize = 5376;
     static constexpr int BlockSize = 64;
     static constexpr int GroupSize = 32;
-    static constexpr int MaxSegments = 8;
+    // Upstream caps this at 8 for its own H3 workloads; reference-video H3
+    // workflows pack 13+ ordered segments, so the A-series build keeps head
+    // room for 32. The segment map is a plain by-value struct and the kernel
+    // loop is unrolled over MaxSegments only.
+    static constexpr int MaxSegments = 32;
 };
 
 struct H3RmsModulationSegmentMap {
