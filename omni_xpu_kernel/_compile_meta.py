@@ -78,6 +78,10 @@ def convrot_dequantize(q, scale, group_size=256):
     return q.new_empty(q.shape, dtype=torch.float32)
 
 
+def convrot_dequantize_dtype(q, scale, group_size=256, out_dtype=torch.bfloat16):
+    return q.new_empty(q.shape, dtype=out_dtype)
+
+
 def gguf(input, dtype, block_bytes, block_elements):
     return input.new_empty((input.numel() // block_bytes * block_elements,), dtype=dtype)
 

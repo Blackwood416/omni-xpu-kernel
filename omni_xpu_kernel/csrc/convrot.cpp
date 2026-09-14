@@ -16,6 +16,9 @@ torch::Tensor dequantize_int8_convrot_fused(
     torch::Tensor input,
     torch::Tensor scale,
     int64_t group_size);
+torch::Tensor dequantize_int8_convrot_fused_dtype(
+    torch::Tensor input, torch::Tensor scale, int64_t group_size,
+    int64_t output_dtype_code);
 std::tuple<torch::Tensor, torch::Tensor> quantize_int8_convrot_fused(
     torch::Tensor input,
     int64_t group_size);
@@ -130,6 +133,26 @@ torch::Tensor dequantize_int8_convrot_weight(
     auto dequantized =
         q.to(torch::kFloat32) * scale.to(q.device()).to(torch::kFloat32);
     return rotate_convrot(dequantized, group_size);
+}
+
+torch::Tensor dequantize_int8_convrot_weight_dtype(
+    torch::Tensor q, torch::Tensor scale, int64_t group_size,
+    int64_t output_dtype_code) {
+    TORCH_CHECK(output_dtype_code >= 0 && output_dtype_code <= 2,
+                "output dtype code must be 0 (fp32), 1 (fp16), or 2 (bf16)");
+    validate_group_size(group_size);
+    TORCH_CHECK(q.dim() == 2 && q.size(1) % group_size == 0,
+                "ConvRot weight must be 2D with features divisible by group size");
+#if defined(OMNI_XPU_ARCH_DG2)
+    // Keep the FP32 inverse-rotation arithmetic; only the final store changes
+    // dtype. This avoids both full FP32 intermediates on low-VRAM LoRA faults.
+    if ((group_size == 64 || group_size == 256) && scale.numel() == q.size(0)) {
+        return dequantize_int8_convrot_fused_dtype(q, scale, group_size, output_dtype_code);
+    }
+#endif
+    const auto output_dtype = output_dtype_code == 0 ? torch::kFloat
+        : output_dtype_code == 1 ? torch::kHalf : torch::kBFloat16;
+    return dequantize_int8_convrot_weight(q, scale, group_size).to(output_dtype);
 }
 
 }  // namespace int8_ops

@@ -169,6 +169,9 @@ namespace int8_ops {
         torch::Tensor weight, int64_t group_size, int64_t stochastic_rounding);
     torch::Tensor dequantize_int8_convrot_weight(
         torch::Tensor q, torch::Tensor scale, int64_t group_size);
+    torch::Tensor dequantize_int8_convrot_weight_dtype(
+        torch::Tensor q, torch::Tensor scale, int64_t group_size,
+        int64_t output_dtype_code);
     torch::Tensor fused_scaleback(torch::Tensor gemm_result, torch::Tensor x_scale,
                                   torch::Tensor w_scale, std::optional<torch::Tensor> bias,
                                   int64_t out_dtype_code);
@@ -724,6 +727,10 @@ PYBIND11_MODULE(_C, m) {
     int8.def("dequantize_int8_convrot_weight", &omni_xpu::int8_ops::dequantize_int8_convrot_weight,
         "Dequantize INT8 ConvRot weight and apply the inverse orthogonal rotation",
         py::arg("q"), py::arg("scale"), py::arg("group_size") = 256);
+    int8.def("dequantize_int8_convrot_weight_dtype", &omni_xpu::int8_ops::dequantize_int8_convrot_weight_dtype,
+        "Dequantize and inverse-rotate INT8 weights with a requested output dtype",
+        py::arg("q"), py::arg("scale"), py::arg("group_size") = 256,
+        py::arg("output_dtype_code") = 2);
     int8.def("fused_scaleback", &omni_xpu::int8_ops::fused_scaleback,
         "ESIMD fused scale-back: int32 GEMM result → output dtype in single pass.\n"
         "Fuses: int32→f32 cast + scale multiply + dtype conversion + bias add.\n"
