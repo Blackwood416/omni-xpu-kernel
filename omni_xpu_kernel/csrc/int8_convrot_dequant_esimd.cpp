@@ -44,11 +44,11 @@ inline void radix4_hadamard_stage(simd<float, GroupSize>& values) {
     }
 }
 
-template<int GroupSize>
+template<int GroupSize, typename OutputT>
 void dequantize_convrot_kernel(
     const int8_t* __restrict__ input,
     const float* __restrict__ scales,
-    float* __restrict__ output,
+    OutputT* __restrict__ output,
     int64_t rows,
     int64_t groups,
     const at::Device& device) {
@@ -73,38 +73,66 @@ void dequantize_convrot_kernel(
                 values *= scales[row];
                 radix4_hadamard_stage<1, GroupSize>(values);
                 values *= 1.0f / sycl::sqrt(static_cast<float>(GroupSize));
-                block_store<float, GroupSize>(output + first, values);
+                simd<OutputT, GroupSize> converted = values;
+                block_store<OutputT, GroupSize>(output + first, converted);
             });
     };
     utils::submit_kernel(cgf, device, "int8_convrot_dequant_fused");
 }
 
+template<typename OutputT>
+void dispatch_dequantize(
+    const torch::Tensor& input, const torch::Tensor& scale,
+    torch::Tensor& output, int64_t group_size) {
+    const int64_t groups = input.size(1) / group_size;
+    auto* output_ptr = reinterpret_cast<OutputT*>(output.data_ptr());
+    if (group_size == 64) {
+        dequantize_convrot_kernel<64, OutputT>(
+            input.data_ptr<int8_t>(), scale.data_ptr<float>(), output_ptr,
+            input.size(0), groups, input.device());
+    } else {
+        dequantize_convrot_kernel<256, OutputT>(
+            input.data_ptr<int8_t>(), scale.data_ptr<float>(), output_ptr,
+            input.size(0), groups, input.device());
+    }
+}
+
 }  // namespace
 
-torch::Tensor dequantize_int8_convrot_fused(
+torch::Tensor dequantize_int8_convrot_fused_dtype(
     torch::Tensor input,
     torch::Tensor scale,
-    int64_t group_size) {
+    int64_t group_size,
+    int64_t output_dtype_code) {
     TORCH_CHECK(input.device().is_xpu(), "input must be on XPU");
     TORCH_CHECK(input.scalar_type() == torch::kInt8, "input must be int8");
     TORCH_CHECK(input.dim() == 2, "input must be 2D");
+    TORCH_CHECK(group_size == 64 || group_size == 256,
+                "fused ConvRot dequantization requires group size 64 or 256");
+    TORCH_CHECK(input.size(1) % group_size == 0,
+                "input features must be divisible by group size");
     TORCH_CHECK(scale.numel() == input.size(0), "scale must be rowwise");
+    TORCH_CHECK(output_dtype_code >= 0 && output_dtype_code <= 2,
+                "output dtype code must be 0 (fp32), 1 (fp16), or 2 (bf16)");
     input = input.contiguous();
     auto scale_f = scale.to(input.device(), torch::kFloat).contiguous();
-    auto output =
-        torch::empty(input.sizes(), input.options().dtype(torch::kFloat));
+    const auto output_dtype = output_dtype_code == 0 ? torch::kFloat
+        : output_dtype_code == 1 ? torch::kHalf : torch::kBFloat16;
+    auto output = torch::empty(input.sizes(), input.options().dtype(output_dtype));
     if (input.numel() == 0) return output;
-    const int64_t groups = input.size(1) / group_size;
-    if (group_size == 64) {
-        dequantize_convrot_kernel<64>(
-            input.data_ptr<int8_t>(), scale_f.data_ptr<float>(),
-            output.data_ptr<float>(), input.size(0), groups, input.device());
+    if (output_dtype_code == 0) {
+        dispatch_dequantize<float>(input, scale_f, output, group_size);
+    } else if (output_dtype_code == 1) {
+        dispatch_dequantize<sycl::half>(input, scale_f, output, group_size);
     } else {
-        dequantize_convrot_kernel<256>(
-            input.data_ptr<int8_t>(), scale_f.data_ptr<float>(),
-            output.data_ptr<float>(), input.size(0), groups, input.device());
+        dispatch_dequantize<sycl::ext::oneapi::bfloat16>(input, scale_f, output, group_size);
     }
     return output;
+}
+
+torch::Tensor dequantize_int8_convrot_fused(
+    torch::Tensor input, torch::Tensor scale, int64_t group_size) {
+    return dequantize_int8_convrot_fused_dtype(input, scale, group_size, 0);
 }
 
 }  // namespace int8_ops

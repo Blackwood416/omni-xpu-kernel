@@ -241,6 +241,26 @@ def _is_supported_h3_swiglu_target() -> bool:
         return False
 
 
+def _is_supported_h3_swiglu_input(x, weight) -> bool:
+    if _is_supported_h3_swiglu_target():
+        return True
+    try:
+        from .. import __xpu_target__, core_aot_target
+
+        # A770, Torch 2.14, driver 32.0.101.8860: the existing strided BF16
+        # kernel was bit-exact on the 0.4 MP / 124-frame H3 activation and
+        # measured 3.33 ms versus 5.43 ms for eager SiLU + in-place multiply.
+        # Keep the BMG low-peak/tiling policies and unmeasured DG2 shapes gated.
+        return (
+            __xpu_target__ == "dg2"
+            and core_aot_target() == "dg2"
+            and tuple(getattr(x, "shape", ())) == (16473, 28672)
+            and tuple(getattr(weight, "shape", ())) == (5376, 14336)
+        )
+    except (ImportError, RuntimeError):
+        return False
+
+
 def _can_fuse_h3_swiglu(
     x: torch.Tensor,
     native,
@@ -254,7 +274,7 @@ def _can_fuse_h3_swiglu(
         input_act == "swiglu"
         and convrot
         and convrot_groupsize == 256
-        and _is_supported_h3_swiglu_target()
+        and _is_supported_h3_swiglu_input(x, weight)
         and native is not None
         and hasattr(native, "fused_silu_mul_exact_bf16")
         and isinstance(x, torch.Tensor)
@@ -1618,6 +1638,31 @@ def dequantize_int8_convrot_weight(
     return _ref_dequantize_int8_convrot_weight(q, scale, group_size)
 
 
+@compile_op("dequantize_int8_convrot_weight_dtype", _meta.convrot_dequantize_dtype)
+def dequantize_int8_convrot_weight_dtype(
+    q: torch.Tensor,
+    scale: torch.Tensor,
+    group_size: int = 256,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Inverse ConvRot in FP32, rounding once into the requested output dtype.
+
+    The DG2 native implementation fuses INT8 dequantization, the radix-4
+    inverse rotation, and the final cast for rowwise scales and groups 64/256.
+    """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.dequantize_int8_convrot_weight_dtype(
+            q, scale, group_size, out_dtype)
+    dtype_codes = {torch.float32: 0, torch.float16: 1, torch.bfloat16: 2}
+    if out_dtype not in dtype_codes:
+        raise ValueError("ConvRot output must be float32, float16, or bfloat16")
+    native = _get_native()
+    if native is not None and hasattr(native, "dequantize_int8_convrot_weight_dtype"):
+        return native.dequantize_int8_convrot_weight_dtype(
+            q, scale, group_size, dtype_codes[out_dtype])
+    return _ref_dequantize_int8_convrot_weight(q, scale, group_size).to(out_dtype)
+
+
 def int8_cache_clear() -> None:
     """Clear cached oneDNN INT8 primitive state."""
     _clear_krea2_activation_cache()
@@ -1653,6 +1698,7 @@ __all__ = [
     "quantize_int8_convrot_fused",
     "quantize_int8_convrot_weight",
     "dequantize_int8_convrot_weight",
+    "dequantize_int8_convrot_weight_dtype",
     "int8_cache_clear",
     "int8_cache_stats",
 ]

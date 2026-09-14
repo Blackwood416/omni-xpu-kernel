@@ -25,7 +25,8 @@ APIS = {
              "dequantize_int8_simple_dtype", "mm_int8", "int8_linear", "int8_linear_prequantized",
              "int8_linear_shared_input", "fused_silu_mul", "fused_silu_mul_quantize_rowwise",
              "fused_swiglu_quantize_rowwise", "fused_gelu_tanh_quantize_rowwise",
-             "rotate_convrot", "quantize_int8_convrot_weight", "dequantize_int8_convrot_weight"),
+             "rotate_convrot", "quantize_int8_convrot_weight", "dequantize_int8_convrot_weight",
+             "dequantize_int8_convrot_weight_dtype"),
     "fp8": ("quantize_per_tensor", "dequantize_per_tensor", "stochastic_rounding"),
     "gguf": ("dequantize_q4_0", "dequantize_q4_0_comfyui", "dequantize_q4_1", "dequantize_q8_0",
              "dequantize_q4_k", "dequantize_q6_k", "dequantize_batch"),
@@ -224,6 +225,7 @@ def case(api, *, dtype=torch.bfloat16, rows=3):
         if name in ("rotate_convrot", "quantize_int8_convrot_weight"):return function, (x, 64), {}
         if name == "quantize_int8_convrot_fused":return function, (x, 64), {}
         if name == "dequantize_int8_convrot_weight":return function, (weight, scale, 64), {}
+        if name == "dequantize_int8_convrot_weight_dtype":return function, (weight, scale, 64), {"out_dtype": dtype}
     raise AssertionError(f"Missing valid fixture for {api}")
 
 

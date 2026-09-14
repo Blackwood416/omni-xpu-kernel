@@ -1901,11 +1901,12 @@ def test_fused_gelu_tanh_quantizer_matches_materialized_boundary(
         )
 
 
-def test_gelu_tanh_int8_linear_uses_native_fused_boundary(device, seed, monkeypatch):
+def test_gelu_tanh_int8_linear_respects_target_fusion_boundary(device, seed, monkeypatch):
     if device.type != "xpu":
         pytest.skip("native XPU extension required")
 
     from omni_xpu_kernel import int8
+    import omni_xpu_kernel as omni
 
     batch, tokens, hidden, output = 2, 17, 256, 96
     x = torch.randn(batch, tokens, hidden, device=device, dtype=torch.bfloat16)
@@ -1920,10 +1921,18 @@ def test_gelu_tanh_int8_linear_uses_native_fused_boundary(device, seed, monkeypa
         out_dtype=torch.bfloat16,
     )
 
-    def reject_materialized_activation(*_args, **_kwargs):
-        raise AssertionError("gelu_tanh materialized a floating activation")
+    fused_target = omni.__xpu_target__ == "bmg" and omni.core_aot_target() == "bmg"
+    materialized_calls = []
+    apply_activation = int8._apply_input_act
 
-    monkeypatch.setattr(int8, "_apply_input_act", reject_materialized_activation)
+    def checked_activation(value, activation):
+        # The fused dispatch was measured only on BMG. DG2 intentionally
+        # materializes GELU; a routing test must not widen that hardware gate.
+        assert not fused_target, "BMG gelu_tanh materialized a floating activation"
+        materialized_calls.append(activation)
+        return apply_activation(value, activation)
+
+    monkeypatch.setattr(int8, "_apply_input_act", checked_activation)
     actual = int8.int8_linear(
         x,
         qweight,
@@ -1931,6 +1940,7 @@ def test_gelu_tanh_int8_linear_uses_native_fused_boundary(device, seed, monkeypa
         out_dtype=torch.bfloat16,
         input_act="gelu_tanh",
     )
+    assert materialized_calls == ([] if fused_target else ["gelu_tanh"])
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
