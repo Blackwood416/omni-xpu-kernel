@@ -180,7 +180,7 @@ def case(api, *, dtype=torch.bfloat16, rows=3):
             shift, scale, *_ = packed.chunk(6, dim=-1)
             return function, (
                 _rand((5376,)), x, scale, shift,
-                [0, 3, 8], [3, 8, 17], [0, 1, 2],
+                [(0, 3, 0), (3, 8, 1), (8, 17, 2)],
             ), {}
         if name == "group_norm_bmg":x = _rand((1, 512, 128, 128))
         else:x = _rand((1, 512, 2, 128, 128), torch.float16).transpose(1, 2).reshape(2, 512, 128, 128)
@@ -429,6 +429,10 @@ def test_dispatcher_schema_fake_and_aot_contract(name, record_property, monkeypa
         pytest.skip("native PTL-H operation unavailable on admitted B70; error covered separately")
     if name == "quantize_int8_tensorwise_scaled":
         args += (torch.tensor(0.125, device="xpu"),)
+    elif name == "rms_norm_segmented_modulation":
+        # Public API takes (start, stop, row) triples; the registered custom op
+        # takes the three parallel int lists.
+        args = args[:-1] + tuple(list(values) for values in zip(*args[-1]))
     elif name.startswith("rotary_rms_rope"):
         if "rope1" not in name:args += (args[-1],)
         args += (1e-6, False, 0)

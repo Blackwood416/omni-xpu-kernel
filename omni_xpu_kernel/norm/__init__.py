@@ -18,7 +18,7 @@ import torch
 
 from .. import _compile_meta as _meta
 from .._compile_ops import compile_op, fake_layer_norm, fake_rms_norm
-from typing import Optional
+from typing import List, Optional, Sequence
 
 
 def _get_native():
@@ -69,32 +69,64 @@ def rms_norm_segmented_modulation_supported(input: torch.Tensor) -> bool:
 
 
 @compile_op("rms_norm_segmented_modulation", _meta.norm_segmented)
+def _segmented_modulation(
+    weight: torch.Tensor,
+    input: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    starts: List[int],
+    stops: List[int],
+    rows: List[int],
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    return _get_native().rms_norm_segmented_modulation(
+        weight, input, scale, shift, starts, stops, rows, eps
+    )
+
+
 def rms_norm_segmented_modulation(
     weight: torch.Tensor,
     input: torch.Tensor,
     scale: torch.Tensor,
     shift: torch.Tensor,
-    starts: list[int],
-    stops: list[int],
-    modulation_rows: list[int],
+    segments: Sequence[tuple[int, int, int]],
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """RMSNorm over one packed stream plus ordered segmented scale/shift.
+    """Fuse RMSNorm and ordered segmented scale/shift modulation.
 
-    MiniMax H3 normalizes the whole stream with a single H5376 reduction and
-    then applies one modulation row to each ordered contiguous segment, with
-    the BF16 materialisation boundaries of the eager reference. ``starts`` /
-    ``stops`` / ``modulation_rows`` must be matched, contiguous and cover
-    every input row (at most eight segments).
+    Preserves BF16 materialization after RMSNorm, ``1 + scale``,
+    multiplication, and shift addition. ``segments`` must contain ordered
+    contiguous ``(start, stop, modulation_row)`` integer triples that cover the
+    complete contiguous BF16 ``[S, 5376]`` input; the shipped kernel accepts up
+    to 32 of them (upstream caps at eight, reference-video H3 packs more).
     """
+    starts = []
+    stops = []
+    modulation_rows = []
+    for segment in segments:
+        if not isinstance(segment, (tuple, list)) or len(segment) != 3:
+            raise TypeError(
+                "segments must contain (start, stop, modulation_row) triples"
+            )
+        if any(type(value) is not int for value in segment):
+            raise TypeError("segment values must be Python integers")
+        start, stop, modulation_row = segment
+        starts.append(start)
+        stops.append(stop)
+        modulation_rows.append(modulation_row)
     if torch.compiler.is_compiling():
         return torch.ops.omni_xpu.rms_norm_segmented_modulation(
-            weight, input, scale, shift,
-            list(starts), list(stops), list(modulation_rows), eps,
+            weight, input, scale, shift, starts, stops, modulation_rows, eps
         )
     return _get_native().rms_norm_segmented_modulation(
-        weight, input, scale, shift,
-        list(starts), list(stops), list(modulation_rows), eps,
+        weight,
+        input,
+        scale,
+        shift,
+        starts,
+        stops,
+        modulation_rows,
+        eps,
     )
 
 
