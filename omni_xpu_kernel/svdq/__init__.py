@@ -149,6 +149,7 @@ def onednn_int4_gemm_preconverted(
     return _get_native().onednn_int4_gemm_preconverted(act, packed_u4, scales_f16)
 
 
+@compile_op("svdq_onednn_int4_gemm_torchao", _meta.svdq_gemm_torchao)
 def onednn_int4_gemm_torchao(
     act: torch.Tensor,
     packed_u4: torch.Tensor,
@@ -170,6 +171,10 @@ def onednn_int4_gemm_torchao(
     Returns:
         [M, N] same dtype as act
     """
+    if torch.compiler.is_compiling():
+        return torch.ops.omni_xpu.svdq_onednn_int4_gemm_torchao(
+            act, packed_u4, zp_u8, scales_f16
+        )
     return _get_native().onednn_int4_gemm_torchao(act, packed_u4, zp_u8, scales_f16)
 
 
@@ -301,6 +306,7 @@ def quantize_act_s8(
     return _get_native().quantize_svdq_act_s8(input, group_size)
 
 
+@compile_op("svdq_onednn_s8u4_gemm", _meta.svdq_gemm_s8u4)
 def onednn_s8u4_gemm(
     act: torch.Tensor,
     xscales: torch.Tensor,
@@ -309,6 +315,12 @@ def onednn_s8u4_gemm(
     out_dtype: torch.dtype = torch.bfloat16,
     zp_u8: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    if torch.compiler.is_compiling():
+        # The registered op mirrors the native contract (fp32 accumulator);
+        # the dtype cast below stays in the graph.
+        return torch.ops.omni_xpu.svdq_onednn_s8u4_gemm(
+            act, xscales, packed_u4, scales_f16, out_dtype, zp_u8
+        ).to(out_dtype)
     out = _get_native().onednn_s8u4_gemm(
         act, xscales, packed_u4, scales_f16, out_dtype, zp_u8
     )
