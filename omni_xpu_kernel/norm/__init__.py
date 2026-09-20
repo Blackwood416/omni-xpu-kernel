@@ -17,8 +17,9 @@ Example:
 import torch
 
 from .. import _compile_meta as _meta
-from .._compile_ops import compile_op, fake_layer_norm, fake_rms_norm
-from typing import List, Optional, Sequence
+from typing import Optional, Sequence, List
+
+from .._compile_ops import compile_op, fake_rms_norm, fake_layer_norm
 
 
 def _get_native():
@@ -347,9 +348,9 @@ def fused_rms_adaln(
 __all__ = [
     "group_norm_bmg",
     "group_norm_seedvr_bmg",
+    "rms_norm",
     "rms_norm_segmented_modulation",
     "rms_norm_segmented_modulation_supported",
-    "rms_norm",
     "rms_norm_gate_residual",
     "layer_norm",
     "fused_add_rms_norm",

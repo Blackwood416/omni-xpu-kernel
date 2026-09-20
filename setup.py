@@ -31,9 +31,52 @@ from setuptools import setup, Extension, find_packages
 from setuptools.command.build_ext import build_ext
 
 IS_WINDOWS = platform.system() == "Windows"
+LINUX_ONEDNN_PACKAGE_VERSION = "2026.0.0"
+LINUX_VALIDATED_ONEDNN_VERSION = (3, 11, 2)
+WINDOWS_ONEDNN_CONTRACTS = {
+    "2.10": ("2025.3.0", (3, 9, 1), "2025.3"),
+    "2.11": ("2025.3.0", (3, 9, 1), "2025.3"),
+    "2.12": ("2025.3.0", (3, 9, 1), "2025.3"),
+    "2.13": ("2026.0.0", (3, 11, 2), "2026.0"),
+    # Torch 2.14 XPU keeps the oneAPI 2026 SYCL ABI; the A770/DG2 Windows
+    # build is validated against the same oneDNN 3.11.2 development install.
+    "2.14": ("2026.0.0", (3, 11, 2), "2026.0"),
+}
+
+
+def get_windows_onednn_contract(torch_version):
+    """Return the package, native ABI, and oneAPI series for a Torch build."""
+    public_version = str(torch_version).split("+", 1)[0]
+    torch_minor = ".".join(public_version.split(".")[:2])
+    try:
+        return WINDOWS_ONEDNN_CONTRACTS[torch_minor]
+    except KeyError as error:
+        supported = ", ".join(WINDOWS_ONEDNN_CONTRACTS)
+        raise RuntimeError(
+            f"No Windows oneDNN contract for Torch {torch_version!r}; "
+            f"supported minors: {supported}"
+        ) from error
+
+
+def get_validated_onednn_version():
+    """Return the platform-specific native oneDNN ABI contract."""
+    if IS_WINDOWS:
+        return get_windows_onednn_contract(BUILD_TORCH_VERSION)[1]
+    return LINUX_VALIDATED_ONEDNN_VERSION
+
+
+def get_onednn_package_version():
+    """Return the package release paired with the selected native ABI."""
+    if IS_WINDOWS:
+        return get_windows_onednn_contract(BUILD_TORCH_VERSION)[0]
+    return LINUX_ONEDNN_PACKAGE_VERSION
 
 
 VERSION_NAMESPACE = run_path(str(Path(__file__).parent / "omni_xpu_kernel" / "_version.py"))
+POLICY_CODEGEN_FILE = Path(__file__).parent / "policy_codegen.py"
+POLICY_CODEGEN_NAMESPACE = run_path(str(POLICY_CODEGEN_FILE))
+POLICY_MANIFEST = POLICY_CODEGEN_NAMESPACE["load_policy_manifest"]()
+POLICY_CODEGEN_NAMESPACE["verify_generated_headers"](POLICY_MANIFEST)
 BUILD_TORCH_VERSION = VERSION_NAMESPACE["get_installed_torch_version"]()
 BUILD_XPU_TARGET = VERSION_NAMESPACE["get_build_xpu_target"]()
 PACKAGE_VERSION = VERSION_NAMESPACE["get_package_version"](
@@ -45,16 +88,70 @@ XPU_ARCH_MACROS = {
     "dg2": "OMNI_XPU_ARCH_DG2",
 }
 XPU_ARCH_MACRO = XPU_ARCH_MACROS[BUILD_XPU_TARGET]
+KERNEL_TUNING_DEFINE_NAMES = POLICY_CODEGEN_NAMESPACE[
+    "EXPECTED_TUNING_PARAMETERS"
+]
 
-# Torch 2.13/2.14 XPU uses the oneAPI 2026 SYCL ABI. Keep upstream's validated
-# oneDNN 3.9.1 contract everywhere else, while selecting the matched 2026
-# oneDNN development runtime for the Windows DG2 compatibility build.
-VALIDATED_ONEDNN_VERSION = (
-    (3, 11, 2)
-    if IS_WINDOWS and BUILD_XPU_TARGET == "dg2"
-    and BUILD_TORCH_VERSION.startswith(("2.13.", "2.14."))
-    else (3, 9, 1)
-)
+
+def get_kernel_tuning_compile_args(*, windows=None):
+    """Parse the intentionally narrow build-time kernel tuning surface."""
+    if windows is None:
+        windows = IS_WINDOWS
+    raw = os.environ.get("OMNI_XPU_TUNING_DEFINES", "").strip()
+    if not raw:
+        return []
+
+    allowed = set(KERNEL_TUNING_DEFINE_NAMES)
+    parsed = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        match = re.fullmatch(r"(OMNI_[A-Z0-9_]+)=(-?[0-9]+)", entry)
+        if match is None:
+            raise RuntimeError(
+                "OMNI_XPU_TUNING_DEFINES entries must use NAME=integer: "
+                f"{entry!r}"
+            )
+        name, value = match.groups()
+        if name not in allowed:
+            raise RuntimeError(
+                f"Unsupported kernel tuning define {name!r}"
+            )
+        if name in parsed:
+            raise RuntimeError(f"Duplicate kernel tuning define {name!r}")
+        parsed[name] = value
+
+    prefix = "/D" if windows else "-D"
+    return [
+        f"{prefix}{name}={parsed[name]}"
+        for name in KERNEL_TUNING_DEFINE_NAMES
+        if name in parsed
+    ]
+
+
+BMG_CUTE_SKU_AOT_TARGETS = {
+    sku: POLICY_MANIFEST["sku_profiles"][sku]["build_target"]
+    for sku in ("b580", "b60", "b70")
+}
+CUTE_AOT_TARGETS = {
+    # Keep one BMG sidecar portable across the maintained physical SKUs. The
+    # target list de-duplicates the shared G21 image used by B580 and B60.
+    "bmg": tuple(dict.fromkeys(BMG_CUTE_SKU_AOT_TARGETS.values())),
+    "ptl-h": ("ptl-h",),
+}
+
+
+def get_cute_aot_target(xpu_target):
+    """Return the OS-independent compiler target list for a CUTE sidecar."""
+    target = str(xpu_target).strip().lower()
+    try:
+        targets = CUTE_AOT_TARGETS[target]
+    except KeyError as error:
+        supported = ", ".join(CUTE_AOT_TARGETS)
+        raise RuntimeError(
+            f"Unsupported CUTE AOT architecture {xpu_target!r}; "
+            f"supported architectures: {supported}"
+        ) from error
+    return ",".join(targets)
 
 # PyTorch 2.14+ headers require C++20; older versions remain on validated C++17.
 is_torch_214_or_newer = BUILD_TORCH_VERSION.startswith("2.14.")
@@ -89,6 +186,51 @@ BMG_CUTE_REMAINDER_MASK_REPLACEMENT = """\
             }
           }
 """
+
+WINDOWS_CUTE_HEADER_PATCHES = {
+    Path("cute/atom/copy_traits_xe_2d.hpp"): (
+        (
+            "#include <cute/atom/copy_traits.hpp>",
+            "#include <cute/atom/copy_traits.hpp>\n\n#include <cstdint>",
+            "Xe 2D payload fixed-width integer include",
+        ),
+        (
+            "__builtin_IB_subgroup_createBlock2DAddressPayload(long base",
+            "__builtin_IB_subgroup_createBlock2DAddressPayload(std::int64_t base",
+            "Xe 2D payload base width",
+        ),
+        (
+            "__builtin_IB_subgroup_setBlock2DAddressPayloadBase(int* addrPayload, long base);",
+            "__builtin_IB_subgroup_setBlock2DAddressPayloadBase(int* addrPayload, std::int64_t base);",
+            "Xe 2D payload base setter width",
+        ),
+    ),
+    Path("cute/arch/mma_xe_legacy_spirv.hpp"): (
+        (
+            ",               ushort, cute::intel::uint8,",
+            ", unsigned short, cute::intel::uint8,",
+            "Windows host scalar ushort declaration",
+        ),
+    ),
+    Path("cutlass/gemm/collective/xe_mma_mixed_input.hpp"): (
+        (
+            "using format_type = ushort;",
+            "using format_type = unsigned short;",
+            "Windows host mixed-input ushort alias",
+        ),
+    ),
+}
+
+
+def replace_exactly_once(text, original, replacement, description):
+    """Apply a pinned source overlay change and fail closed on drift."""
+    matches = text.count(original)
+    if matches != 1:
+        raise RuntimeError(
+            f"Pinned sycl-tla {description} source no longer matches the "
+            f"validated overlay contract (matches={matches})"
+        )
+    return text.replace(original, replacement, 1)
 
 
 def get_core_aot_compile_args(xpu_target):
@@ -215,26 +357,38 @@ def prepare_bmg_cute_include_overlay(cutlass_root, build_temp):
             f"{mainloop_source} and {fusion_source}"
         )
 
-    text = mainloop_source.read_text(encoding="utf-8")
-    matches = text.count(BMG_CUTE_REMAINDER_MASK_ORIGINAL)
-    if matches != 1:
-        raise RuntimeError(
-            "Pinned sycl-tla BMG remainder-mask source no longer matches the "
-            f"validated overlay contract (matches={matches})"
-        )
+    text = replace_exactly_once(
+        mainloop_source.read_text(encoding="utf-8"),
+        BMG_CUTE_REMAINDER_MASK_ORIGINAL,
+        BMG_CUTE_REMAINDER_MASK_REPLACEMENT,
+        "BMG remainder-mask",
+    )
 
     overlay_root = Path(build_temp) / "cute_bmg_include_overlay"
     overlay_dir = overlay_root / relative_dir
     overlay_dir.mkdir(parents=True, exist_ok=True)
-    (overlay_dir / mainloop_source.name).write_text(
-        text.replace(
-            BMG_CUTE_REMAINDER_MASK_ORIGINAL,
-            BMG_CUTE_REMAINDER_MASK_REPLACEMENT,
-            1,
-        ),
-        encoding="utf-8",
-    )
+    (overlay_dir / mainloop_source.name).write_text(text, encoding="utf-8")
     shutil.copyfile(fusion_source, overlay_dir / fusion_source.name)
+
+    # sycl-tla v0.8 uses C++ ``long`` for GPU addresses, but Windows is LLP64.
+    # Keep all compatibility fixes private to the build and fail on source drift.
+    if IS_WINDOWS:
+        include_root = Path(cutlass_root) / "include"
+        for relative_path, patches in WINDOWS_CUTE_HEADER_PATCHES.items():
+            source = include_root / relative_path
+            if not source.is_file():
+                raise RuntimeError(
+                    "Windows CUTE overlay needs the pinned sycl-tla header: "
+                    f"{source}"
+                )
+            patched_text = source.read_text(encoding="utf-8")
+            for original, replacement, description in patches:
+                patched_text = replace_exactly_once(
+                    patched_text, original, replacement, description
+                )
+            destination = overlay_root / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(patched_text, encoding="utf-8")
     return overlay_root
 
 
@@ -274,26 +428,65 @@ def get_icpx_path():
     return None
 
 
-def get_compile_env(onednn_include=""):
-    """Keep the explicitly selected oneDNN include directory authoritative."""
-    env = os.environ.copy()
-    if not onednn_include:
-        return env
+def get_windows_compiler_tool_dirs(compiler):
+    """Return AOT helper directories beside an installed Windows compiler."""
+    if not IS_WINDOWS or not compiler:
+        return []
 
-    selected = os.path.normcase(os.path.realpath(onednn_include))
-    for name in ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"):
-        value = env.get(name)
-        if not value:
-            continue
-        paths = value.split(os.pathsep)
-        paths = [
-            path for path in paths
-            if not path or os.path.normcase(os.path.realpath(path)) != selected
-        ]
-        if paths:
-            env[name] = os.pathsep.join(paths)
-        else:
-            env.pop(name, None)
+    compiler_bin = Path(compiler).resolve().parent
+    compiler_series = compiler_bin.parent
+    candidates = [compiler_bin / "compiler"]
+    if compiler_series.parent.name.lower() == "compiler":
+        oneapi_root = compiler_series.parent.parent
+        candidates.append(
+            oneapi_root / "ocloc" / compiler_series.name / "bin"
+        )
+    return [path for path in candidates if path.is_dir()]
+
+
+def get_windows_compiler_library_dirs(compiler):
+    """Return Intel compiler runtime-library directories on Windows."""
+    if not IS_WINDOWS or not compiler:
+        return []
+
+    compiler_bin = Path(compiler).resolve().parent
+    compiler_series = compiler_bin.parent
+    candidates = [compiler_series / "lib"]
+    return [path for path in candidates if path.is_dir()]
+
+
+def get_compile_env(onednn_include="", compiler=""):
+    """Prepare the selected oneDNN and Windows AOT compiler environment."""
+    env = os.environ.copy()
+    if onednn_include:
+        selected = os.path.normcase(os.path.realpath(onednn_include))
+        for name in ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"):
+            value = env.get(name)
+            if not value:
+                continue
+            paths = value.split(os.pathsep)
+            paths = [
+                path for path in paths
+                if not path or os.path.normcase(os.path.realpath(path)) != selected
+            ]
+            if paths:
+                env[name] = os.pathsep.join(paths)
+            else:
+                env.pop(name, None)
+
+    compiler_tools = get_windows_compiler_tool_dirs(compiler)
+    if compiler_tools:
+        current_paths = env.get("PATH", "").split(os.pathsep)
+        env["PATH"] = os.pathsep.join(
+            [os.fspath(path) for path in compiler_tools] + current_paths
+        )
+    compiler_libraries = get_windows_compiler_library_dirs(compiler)
+    if compiler_libraries:
+        current_libraries = env.get("LIB", "").split(os.pathsep)
+        env["LIB"] = os.pathsep.join(
+            [os.fspath(path) for path in compiler_libraries]
+            + current_libraries
+        )
     return env
 
 
@@ -445,12 +638,13 @@ def get_onednn_paths():
             Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
             Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
         )
+        install_series = get_windows_onednn_contract(BUILD_TORCH_VERSION)[2]
         for program_root in program_roots:
             dnnl_root = program_root / "Intel" / "oneAPI" / "dnnl"
             oneapi_roots.extend(
                 [
+                    dnnl_root / install_series,
                     dnnl_root / "latest",
-                    dnnl_root / "2025.3",
                 ]
             )
 
@@ -476,12 +670,14 @@ def get_onednn_paths():
             continue
 
         header_version = get_onednn_header_version(include_dir)
-        if header_version != VALIDATED_ONEDNN_VERSION:
-            expected = ".".join(map(str, VALIDATED_ONEDNN_VERSION))
+        validated_version = get_validated_onednn_version()
+        if header_version != validated_version:
+            expected = ".".join(map(str, validated_version))
             actual = ".".join(map(str, header_version))
+            package = get_onednn_package_version()
             raise RuntimeError(
                 f"Unsupported oneDNN headers {actual} from {include_dir}; "
-                f"expected the validated build version {expected}"
+                f"expected {expected} to match onednn=={package}"
             )
         library_version = get_onednn_library_version(runtime_library)
         if library_version is not None and library_version != header_version:
@@ -500,16 +696,19 @@ def get_onednn_paths():
         )
 
     if IS_WINDOWS:
-        expected = ".".join(map(str, VALIDATED_ONEDNN_VERSION))
+        expected = ".".join(map(str, get_validated_onednn_version()))
         raise RuntimeError(
             f"A matched oneDNN {expected} development installation was not found. "
             "Set DNNLROOT to a complete oneAPI installation, or set "
             "ONEDNN_INCLUDE, ONEDNN_LIB, and ONEDNN_RUNTIME to matched files."
         )
+    expected = ".".join(map(str, get_validated_onednn_version()))
+    package = get_onednn_package_version()
     raise RuntimeError(
-        "oneDNN 3.9.1 headers and runtime were not found in the active Python "
-        "prefix. Install onednn==2025.3.0 and onednn-devel==2025.3.0. "
-        "For an explicit non-pip build, set both ONEDNN_INCLUDE and ONEDNN_LIB."
+        f"oneDNN {expected} headers and runtime were not found in the active "
+        f"Python prefix. Install onednn=={package} and "
+        f"onednn-devel=={package}. For an explicit non-pip build, set both "
+        "ONEDNN_INCLUDE and ONEDNN_LIB."
     )
 
 
@@ -560,7 +759,7 @@ def bundle_windows_onednn_runtime(
         shutil.copy2(notice_dir / name, notice_target / name)
 
     digest = hashlib.sha256(runtime_target.read_bytes()).hexdigest()
-    version = ".".join(map(str, VALIDATED_ONEDNN_VERSION))
+    version = ".".join(map(str, get_validated_onednn_version()))
     (notice_target / "VERSION").write_text(
         f"oneDNN={version}\ndnnl.dll.sha256={digest}\n",
         encoding="utf-8",
@@ -646,6 +845,11 @@ class ICPXBuildExt(build_ext):
         elif is_cute:
             src_dir = Path(ext.sourcedir) / "omni_xpu_kernel" / "cute"
             sources = [src_dir / "cute_fmha_torch.cpp"]
+            if BUILD_XPU_TARGET == "bmg":
+                sources += [
+                    src_dir / "sol_attn_prepare.cpp",
+                    src_dir / "sol_attn_torch.cpp",
+                ]
         else:
             src_dir = Path(ext.sourcedir) / "omni_xpu_kernel" / "csrc"
             sources = list(src_dir.glob("*.cpp"))
@@ -678,11 +882,6 @@ class ICPXBuildExt(build_ext):
         if onednn_notice_dir is not None:
             print(f"oneDNN notices: {onednn_notice_dir}")
         
-        if is_cute and IS_WINDOWS:
-            # cute FMHA has no Windows build path (and is filtered out of
-            # ext_modules on Windows); guard here in case it is reached directly.
-            raise RuntimeError("cute_fmha_torch is Linux-only; not supported on Windows.")
-
         if IS_WINDOWS:
             # Windows compile command using icx
             python_version = f"{sys.version_info.major}{sys.version_info.minor}"
@@ -710,6 +909,70 @@ class ICPXBuildExt(build_ext):
                 _compiler_lib = str(Path(icpx).resolve().parent.parent / "lib")
                 cmd.append("/link")
                 cmd.append(f"/LIBPATH:{_compiler_lib}")
+            elif is_cute:
+                cutlass = os.environ.get("CUTLASS_SYCL_ROOT", "")
+                if not cutlass or not os.path.isdir(cutlass):
+                    raise RuntimeError(
+                        "cute_fmha_torch needs CUTLASS_SYCL_ROOT set to a "
+                        "cutlass-sycl (sycl-tla) source tree containing "
+                        "include/, tools/util/include/, examples/common/, "
+                        "applications/. Got: " + repr(cutlass)
+                    )
+                if BUILD_XPU_TARGET != "bmg":
+                    raise RuntimeError(
+                        "Windows CUTE is currently available only for "
+                        "OMNI_XPU_DEVICE=bmg"
+                    )
+                cute_aot_target = get_cute_aot_target(BUILD_XPU_TARGET)
+                print(f"CUTE AOT target: {cute_aot_target}")
+                overlay = prepare_bmg_cute_include_overlay(
+                    cutlass, self.build_temp
+                )
+                cmd += [
+                    "-O3",
+                    "-DNDEBUG",
+                    "/MD",
+                    "/EHsc",
+                    "/std:c++17",
+                    "/LD",
+                    "-fsycl-targets=spir64_gen",
+                    "-Xsycl-target-backend=spir64_gen",
+                    f"-device {cute_aot_target}",
+                    "-Xspirv-translator",
+                    "-spirv-ext=+SPV_INTEL_split_barrier,+SPV_INTEL_2d_block_io,"
+                    "+SPV_INTEL_subgroup_matrix_multiply_accumulate",
+                    "-fno-sycl-instrument-device-code",
+                    "-DCUTLASS_ENABLE_SYCL",
+                    "-DSYCL_INTEL_TARGET",
+                    f"-D{XPU_ARCH_MACRO}=1",
+                    f"-D_GLIBCXX_USE_CXX11_ABI={torch_cxx11_abi}",
+                    "-Wno-ignored-attributes",
+                    "-Wno-deprecated-declarations",
+                    "/DNOMINMAX",
+                    "/DWIN32_LEAN_AND_MEAN",
+                    f"/I{overlay}",
+                    f"/I{src_dir}",
+                    f"/I{Path(cutlass) / 'include'}",
+                    f"/I{Path(cutlass) / 'tools' / 'util' / 'include'}",
+                    f"/I{Path(cutlass) / 'examples' / 'common'}",
+                    f"/I{Path(cutlass) / 'applications'}",
+                    f"/I{python_include}",
+                    f"/I{torch_include}",
+                    f"/I{torch_include / 'torch' / 'csrc' / 'api' / 'include'}",
+                    f"/Fe:{output_path}",
+                ]
+                cmd += [str(s) for s in sources] + [
+                    "/link",
+                    f"/LIBPATH:{torch_lib}",
+                    f"/LIBPATH:{python_lib_dir}",
+                    "torch.lib",
+                    "torch_python.lib",
+                    "torch_cpu.lib",
+                    "torch_xpu.lib",
+                    "c10.lib",
+                    "c10_xpu.lib",
+                    f"python{python_version}.lib",
+                ]
             else:
                 core_aot_args = get_core_aot_compile_args(BUILD_XPU_TARGET)
                 common_compile = [
@@ -722,6 +985,7 @@ class ICPXBuildExt(build_ext):
                     "/EHsc",  # Enable C++ exception handling
                     CPP_STD_MSVC,
                 ]
+                cmd += get_kernel_tuning_compile_args(windows=True)
                 # PyTorch XPU wheels also bundle oneDNN headers. Keep the
                 # headers selected with the external oneDNN library first so
                 # declarations and exported symbols use the same ABI.
@@ -795,10 +1059,12 @@ class ICPXBuildExt(build_ext):
                         cutlass, self.build_temp
                     )
                     cute_overlay_flags.append(f"-I{overlay}")
+                cute_aot_target = get_cute_aot_target(BUILD_XPU_TARGET)
+                print(f"CUTE AOT target: {cute_aot_target}")
                 cmd += [
                     CPP_STD_POSIX, "-O3", "-DNDEBUG", "-fPIC", "-shared",
                     "-fsycl-targets=spir64_gen",
-                    "-Xsycl-target-backend", f"-device {BUILD_XPU_TARGET}",
+                    "-Xsycl-target-backend", f"-device {cute_aot_target}",
                     "-Xspirv-translator",
                     "-spirv-ext=+SPV_INTEL_split_barrier,+SPV_INTEL_2d_block_io,"
                     "+SPV_INTEL_subgroup_matrix_multiply_accumulate",
@@ -839,6 +1105,7 @@ class ICPXBuildExt(build_ext):
                     "-fPIC", "-shared",
                     CPP_STD_POSIX,
                 ]
+                cmd += get_kernel_tuning_compile_args(windows=False)
                 # torch/include contains another oneDNN header tree. Put the
                 # explicitly selected installation first so it matches -ldnnl.
                 if has_onednn:
@@ -937,10 +1204,17 @@ class ICPXExtension(Extension):
             depends = sorted(kernel_root.rglob("*.h"))
         elif name.endswith("cute_fmha_torch"):
             kernel_root = source_root / "omni_xpu_kernel" / "cute"
-            sources = [kernel_root / "cute_fmha_torch.cpp"]
+            sources = [
+                kernel_root / "cute_fmha_torch.cpp",
+                kernel_root / "sol_attn_prepare.cpp",
+                kernel_root / "sol_attn_torch.cpp",
+            ]
             csrc_root = source_root / "omni_xpu_kernel" / "csrc"
-            depends = [
-                kernel_root / "cute_fmha_config.h",
+            depends = sorted(kernel_root.glob("*.h")) + sorted(
+                kernel_root.glob("*.hpp")
+            ) + [
+                csrc_root / "bmg_device_policy.h",
+                csrc_root / "bmg_device_warning.h",
                 csrc_root / "bmg_kernel_policy.h",
                 csrc_root / "device_utils.h",
             ]
@@ -948,6 +1222,25 @@ class ICPXExtension(Extension):
             kernel_root = source_root / "omni_xpu_kernel" / "csrc"
             sources = sorted(kernel_root.glob("*.cpp"))
             depends = sorted(kernel_root.glob("*.h"))
+        depends += [
+            source_root / "policy_codegen.py",
+            source_root
+            / "omni_xpu_kernel"
+            / "policies"
+            / "kernel-policy-v1.json",
+            source_root
+            / "omni_xpu_kernel"
+            / "policies"
+            / "kernel-policy-v1.schema.json",
+        ]
+        depends += sorted(
+            (
+                source_root
+                / "omni_xpu_kernel"
+                / "csrc"
+                / "generated"
+            ).glob("*.h")
+        )
         super().__init__(
             name,
             sources=[source.as_posix() for source in sources],
@@ -974,6 +1267,8 @@ def get_long_description():
 # Set OMNI_XPU_REQUIRE_CUTE=0 explicitly for a core-only build (including
 # Windows, where the CUTE extension is not supported).
 _is_dg2_target = BUILD_XPU_TARGET == "dg2"
+# Extension list. CUTE is required by default on Linux. Windows remains a
+# core-only build unless OMNI_XPU_REQUIRE_CUTE=1 is set explicitly.
 _ext_modules = [
     ICPXExtension("omni_xpu_kernel._C", sourcedir="."),
     ICPXExtension("omni_xpu_kernel.lgrf_uni.lgrf_sdp", sourcedir="."),
@@ -981,31 +1276,41 @@ _ext_modules = [
 # CUTE FMHA remains unsupported on DG2; the DG2 SDP sidecar uses the native
 # WG=32 ESIMD kernel (see lgrf_uni/single_kernels/flash.attn.b.mha.dg2.h).
 _cutlass_sycl_root = os.environ.get("CUTLASS_SYCL_ROOT", "")
-_cutlass_default = "0" if _is_dg2_target else "1"
-_cutlass_sycl_required = os.environ.get(
-    "OMNI_XPU_REQUIRE_CUTE", _cutlass_default
-) != "0"
+# CUTE is required by default on Linux. Windows remains a core-only build
+# unless OMNI_XPU_REQUIRE_CUTE=1 is set explicitly, and the A770/DG2 profile
+# never builds it: its SDP sidecar is the native WG=32 ESIMD kernel.
+_cutlass_sycl_default = "0" if (IS_WINDOWS or _is_dg2_target) else "1"
+_cutlass_sycl_required = (
+    os.environ.get("OMNI_XPU_REQUIRE_CUTE", _cutlass_sycl_default) != "0"
+)
 _cutlass_sycl_dirs = ("include", "tools/util/include", "examples/common", "applications")
 _cutlass_sycl_available = bool(_cutlass_sycl_root) and all(
     os.path.isdir(os.path.join(_cutlass_sycl_root, path)) for path in _cutlass_sycl_dirs
 )
-if _cutlass_sycl_required and IS_WINDOWS:
-    raise RuntimeError(
-        "CUTE is required by default but unsupported on Windows; "
-        "set OMNI_XPU_REQUIRE_CUTE=0 for an explicit core-only build"
-    )
 if _is_dg2_target and _cutlass_sycl_required:
     raise RuntimeError(
         "CUTE FMHA is not supported by the A770/DG2 core-only profile"
     )
 if _cutlass_sycl_required and not _cutlass_sycl_available:
+    requirement = (
+        "CUTE was explicitly enabled on Windows"
+        if IS_WINDOWS
+        else "CUTE is required by default"
+    )
+    opt_out = (
+        "Unset OMNI_XPU_REQUIRE_CUTE on Windows, or set it to 0, for a "
+        "core-only build."
+        if IS_WINDOWS
+        else "Set OMNI_XPU_REQUIRE_CUTE=0 only for an explicit core-only "
+        "build."
+    )
     raise RuntimeError(
-        "CUTE is required by default; set CUTLASS_SYCL_ROOT containing: "
+        requirement + "; set CUTLASS_SYCL_ROOT containing: "
         + ", ".join(_cutlass_sycl_dirs)
         + f"; got {_cutlass_sycl_root!r}"
-        + ". Set OMNI_XPU_REQUIRE_CUTE=0 only for an explicit core-only build."
+        + ". " + opt_out
     )
-if not _is_dg2_target and not IS_WINDOWS and _cutlass_sycl_available:
+if _cutlass_sycl_available and not _is_dg2_target and (not IS_WINDOWS or _cutlass_sycl_required):
     _ext_modules.append(ICPXExtension("omni_xpu_kernel.cute.cute_fmha_torch", sourcedir="."))
 
 setup(
@@ -1031,6 +1336,7 @@ setup(
         "omni_xpu_kernel": [
             ".libs/*.dll",
             ".libs/onednn/*",
+            "policies/*.json",
         ],
     },
     include_package_data=True,
@@ -1039,7 +1345,7 @@ setup(
     python_requires=">=3.9",
     install_requires=[
         f"torch=={BUILD_TORCH_VERSION}",
-        "onednn==2025.3.0; platform_system == 'Linux' and platform_machine == 'x86_64'",
+        f"onednn=={LINUX_ONEDNN_PACKAGE_VERSION}; platform_system == 'Linux' and platform_machine == 'x86_64'",
     ],
     extras_require={
         "dev": [

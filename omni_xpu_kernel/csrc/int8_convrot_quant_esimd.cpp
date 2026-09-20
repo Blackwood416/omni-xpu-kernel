@@ -4,6 +4,7 @@
 
 #include <tuple>
 
+#include "kernel_tuning_overrides.h"
 #include "utils.h"
 
 using fp16 = sycl::half;
@@ -13,19 +14,6 @@ using namespace sycl::ext::intel::esimd;
 namespace omni_xpu {
 namespace int8_ops {
 namespace {
-
-#ifndef OMNI_CONVROT_QUANT_WG_SIZE
-#if defined(OMNI_XPU_ARCH_PTL_H)
-#define OMNI_CONVROT_QUANT_WG_SIZE 1
-#elif defined(OMNI_XPU_ARCH_BMG)
-// The fused path remains disabled on BMG until it is measured there.
-#define OMNI_CONVROT_QUANT_WG_SIZE 8
-#elif defined(OMNI_XPU_ARCH_DG2)
-#define OMNI_CONVROT_QUANT_WG_SIZE 1
-#else
-#error "Define a supported OMNI_XPU_ARCH target"
-#endif
-#endif
 
 template<int Stride, int GroupSize>
 inline void radix4_hadamard_stage(simd<float, GroupSize>& values) {

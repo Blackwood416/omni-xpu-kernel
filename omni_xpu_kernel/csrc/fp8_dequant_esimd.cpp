@@ -2,6 +2,7 @@
 #include <sycl/sycl.hpp>
 #include <sycl/ext/intel/esimd.hpp>
 
+#include "kernel_tuning_overrides.h"
 #include "utils.h"
 
 using fp16 = sycl::half;
@@ -11,19 +12,6 @@ using namespace sycl::ext::intel::esimd;
 namespace omni_xpu {
 namespace fp8 {
 namespace {
-
-#ifndef OMNI_FP8_DEQUANT_ELEMENTS_PER_WI
-#if defined(OMNI_XPU_ARCH_PTL_H)
-#define OMNI_FP8_DEQUANT_ELEMENTS_PER_WI 256
-#elif defined(OMNI_XPU_ARCH_BMG)
-#define OMNI_FP8_DEQUANT_ELEMENTS_PER_WI 256
-#elif defined(OMNI_XPU_ARCH_DG2)
-// Keep every DG2 block message at or below 256 bytes.
-#define OMNI_FP8_DEQUANT_ELEMENTS_PER_WI 64
-#else
-#error "Define a supported OMNI_XPU_ARCH target"
-#endif
-#endif
 
 template<int MantissaBits, int Bias, bool FiniteOnly>
 float decode_fp8(uint8_t code) {
@@ -86,8 +74,13 @@ void dequantize_kernel(
                 const int64_t remaining = numel - first;
 
                 if (remaining >= ElementsPerWorkItem) {
-                    simd<uint8_t, ElementsPerWorkItem> codes =
-                        block_load<uint8_t, ElementsPerWorkItem>(input + first);
+                    // FP8 views may start at any byte offset.  ESIMD
+                    // block_load<uint8_t> requires stronger alignment and
+                    // corrupts every fourth code for a one-byte-offset view
+                    // on BMG.  copy_from preserves the vectorized load while
+                    // accepting arbitrary element alignment.
+                    simd<uint8_t, ElementsPerWorkItem> codes;
+                    codes.copy_from(input + first);
                     simd<uint32_t, ElementsPerWorkItem> raw = codes;
                     simd<uint32_t, ElementsPerWorkItem> sign =
                         (raw & 0x80u) << 24;
