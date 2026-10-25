@@ -15,6 +15,21 @@ def void(*args, **kwargs):
     return None
 
 
+def kitchen_decode(q, k, v, lengths, causal=True):
+    return (q.new_empty((q.shape[0], q.shape[2], q.shape[1] * q.shape[3])),
+            q.new_empty(q.shape[:3], dtype=torch.float32))
+
+
+def kitchen_int8_decode(query, key, value, key_scale, value_scale, length, capacity):
+    return kitchen_decode(query, key, value, length, False)
+
+
+def kitchen_deferred_delta(x, w_a, w_b, dt_bias, g_decay, state, key_dim,
+                           key_heads, scale, z, norm_weight, eps, qkv_buf,
+                           gates_buf, sumsq_buf, ctl):
+    return x.new_empty((x.shape[0],x.shape[1],state.shape[1],state.shape[3]))
+
+
 def kitchen_delta_conv(proj, conv_state, conv_w, conv_b=None, snapshots=None):
     return proj.new_empty((proj.shape[0], proj.shape[2], proj.shape[1]))
 
@@ -34,6 +49,12 @@ def kitchen_rms_norm_quantize(input, weight, eps=1e-6):
 
 def kitchen_rms_norm_convrot_quantize(input, weight, eps=1e-6, group_size=256):
     return kitchen_rms_norm_quantize(input, weight, eps)
+
+
+def kitchen_gated_quantize(input, input_act, group_size=0):
+    shape = (*input.shape[:-1], input.shape[-1] // 2)
+    return (input.new_empty(shape, dtype=torch.int8),
+            input.new_empty((*input.shape[:-1], 1), dtype=torch.float32))
 
 
 def kitchen_group_norm_pad(input, weight=None, bias=None, groups=32,

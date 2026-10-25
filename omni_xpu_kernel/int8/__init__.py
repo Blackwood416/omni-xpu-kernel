@@ -36,6 +36,8 @@ Example:
 """
 
 import os
+import contextlib
+import sys
 import threading
 from typing import Optional, Tuple
 
@@ -76,6 +78,54 @@ def _get_native():
         return None
 
 
+_allocation_context_factory = contextlib.nullcontext
+
+
+def set_allocation_context_factory(factory) -> None:
+    """Select the caller context used for persistent ConvRot cache creation."""
+    global _allocation_context_factory
+    if not callable(factory):
+        raise TypeError("allocation context factory must be callable")
+    _allocation_context_factory = factory
+
+
+def _prepare_native_convrot_hadamard(native, exemplar, group_size, *, fp32=False):
+    prepare = getattr(native, "prepare_convrot_hadamard", None)
+    if prepare is None:
+        return False
+    with _allocation_context_factory():
+        prepare(exemplar, group_size, fp32)
+    return True
+
+
+def prepare_convrot_hadamard(exemplar: torch.Tensor, group_size: int = 256,
+                             *, fp32: bool = False) -> bool:
+    """Prepare a persistent native matrix under the caller's allocation context."""
+    native = _get_native()
+    return (native is not None and
+            _prepare_native_convrot_hadamard(native, exemplar, group_size,
+                                             fp32=fp32))
+
+
+def clear_convrot_hadamard_cache(device_index: int) -> int:
+    """Synchronize one XPU device, then release its persistent ConvRot matrices."""
+    if type(device_index) is not int or device_index < 0:
+        raise ValueError("ConvRot cache device index must be nonnegative")
+    native = _get_native()
+    if native is None:
+        return 0
+    clear = getattr(native, "clear_convrot_hadamard_cache", None)
+    if clear is None:
+        raise RuntimeError("native ConvRot cache release is unavailable")
+    torch.xpu.synchronize(device_index)
+    return int(clear(device_index))
+
+
+def _native_rotate_convrot(native, x, group_size):
+    _prepare_native_convrot_hadamard(native, x, group_size)
+    return native.rotate_convrot(x, group_size)
+
+
 def _apply_input_act(
     x: torch.Tensor, input_act: Optional[str]
 ) -> torch.Tensor:
@@ -86,9 +136,13 @@ def _apply_input_act(
     if input_act == "swiglu":
         gate, up = x.chunk(2, dim=-1)
         return torch.nn.functional.silu(gate).mul_(up)
+    if input_act == "situ":
+        hidden, gate = x.chunk(2, dim=-1)
+        gated = gate.div(4.0).tanh_().mul_(4.0).mul_(torch.sigmoid(gate))
+        return hidden.div(25.0).tanh_().mul_(25.0).mul_(gated)
     raise ValueError(
         f"unsupported input_act: {input_act!r} "
-        "(expected one of ['gelu_tanh', 'none', 'swiglu'])"
+        "(expected one of ['gelu_tanh', 'none', 'situ', 'swiglu'])"
     )
 
 
@@ -459,7 +513,7 @@ def _stream_h3_swiglu_int8_linear(
                 activated, native, 256
             )
         else:
-            rotated = native.rotate_convrot(activated, 256)
+            rotated = _native_rotate_convrot(native, activated, 256)
             x_int8, x_scale = native.quantize_int8_rowwise_fused(rotated)
         output_chunk = output[start:stop]
         native.int8_linear_prequantized_out(
@@ -551,7 +605,7 @@ def _stream_h3_convrot_int8_linear(
         if _can_use_dg2_convrot_fused(chunk, native, True, 256):
             x_int8, x_scale = _apply_dg2_convrot_fused(chunk, native, 256)
         else:
-            rotated = native.rotate_convrot(chunk, 256)
+            rotated = _native_rotate_convrot(native, chunk, 256)
             x_int8, x_scale = native.quantize_int8_rowwise_fused(rotated)
         output_chunk = output[start:stop]
         native.int8_linear_prequantized_out(
@@ -872,7 +926,7 @@ def _quantize_krea2_int8_convrot(
         return x_int8, x_scale
 
     _clear_krea2_activation_cache()
-    rotated = native.rotate_convrot(x, 256)
+    rotated = _native_rotate_convrot(native, x, 256)
     x_int8, x_scale = native.quantize_int8_rowwise_fused(rotated)
     _krea2_activation_cache.key = key
     _krea2_activation_cache.input = x
@@ -1150,8 +1204,8 @@ def int8_linear(
         return torch.ops.omni_xpu.int8_linear(x, weight, weight_scale, bias, out_dtype, convrot, convrot_groupsize, input_act)
     if out_dtype is None:
         out_dtype = x.dtype
-    width = 2 if input_act == "swiglu" else 1
-    if input_act not in (None, "none", "gelu_tanh", "swiglu"):
+    width = 2 if input_act in ("swiglu", "situ") else 1
+    if input_act not in (None, "none", "gelu_tanh", "swiglu", "situ"):
         _apply_input_act(x, input_act)
     if x.shape[-1] != weight.shape[-1] * width:
         raise ValueError(
@@ -1165,6 +1219,22 @@ def int8_linear(
             torch.float16: 1,
             torch.bfloat16: 2,
         }.get(out_dtype, 2)
+        if (input_act == "situ" and x.dtype in (torch.float16, torch.bfloat16)
+                and 0 < x.shape[-1] // 2 <= 8192
+                and (not convrot or convrot_groupsize in (64, 256))
+                and (not convrot or x.shape[-1] // 2 % convrot_groupsize == 0)
+                and hasattr(native, "int8_linear_prequantized")):
+            from .. import kitchen
+
+            if kitchen.supports_gated_quantize_int8():
+                _clear_krea2_activation_cache()
+                _clear_bmg_qkv_activation_cache()
+                quantized, scale = kitchen.gated_quantize_int8(
+                    x, input_act, convrot_groupsize if convrot else 0,
+                )
+                return native.int8_linear_prequantized(
+                    quantized, scale, weight, weight_scale, bias, dtype_code,
+                )
         if (
             input_act == "swiglu"
             and not convrot
@@ -1325,7 +1395,7 @@ def int8_linear(
                     f"input features {x.shape[-1]}"
                 )
             if hasattr(native, "rotate_convrot"):
-                x = native.rotate_convrot(x, convrot_groupsize)
+                x = _native_rotate_convrot(native, x, convrot_groupsize)
             else:
                 from ._reference import _build_hadamard, _rotate_activation
 
@@ -1480,7 +1550,7 @@ def int8_linear_shared_input(
                     f"input features {x.shape[-1]}"
                 )
             if hasattr(native, "rotate_convrot"):
-                x = native.rotate_convrot(x, convrot_groupsize)
+                x = _native_rotate_convrot(native, x, convrot_groupsize)
             else:
                 from ._reference import _build_hadamard, _rotate_activation
 
@@ -1527,7 +1597,7 @@ def rotate_convrot(
         )
     native = _get_native()
     if native is not None and hasattr(native, "rotate_convrot"):
-        return native.rotate_convrot(x, group_size)
+        return _native_rotate_convrot(native, x, group_size)
 
     from ._reference import _build_hadamard, _rotate_activation
 
@@ -1588,6 +1658,7 @@ def quantize_int8_convrot_weight(
         )
     native = _get_native()
     if native is not None and hasattr(native, "quantize_int8_convrot_weight"):
+        _prepare_native_convrot_hadamard(native, weight, group_size)
         return native.quantize_int8_convrot_weight(
             weight, group_size, stochastic_rounding
         )
@@ -1614,6 +1685,7 @@ def dequantize_int8_convrot_weight(
         return torch.ops.omni_xpu.dequantize_int8_convrot_weight(q, scale, group_size)
     native = _get_native()
     if native is not None and hasattr(native, "dequantize_int8_convrot_weight"):
+        _prepare_native_convrot_hadamard(native, q, group_size, fp32=True)
         return native.dequantize_int8_convrot_weight(q, scale, group_size)
     return _ref_dequantize_int8_convrot_weight(q, scale, group_size)
 
@@ -1661,6 +1733,21 @@ def int8_cache_stats() -> dict:
     return {"hits": 0, "misses": 0, "size": 0}
 
 
+def release_onednn_int8_cache() -> int:
+    """Flush linked oneDNN primitive state after all XPU work has stopped."""
+    if sys.platform != "linux":
+        raise RuntimeError("oneDNN INT8 cache release is Linux-only")
+    native = _get_native()
+    release = getattr(native, "release_onednn_int8_cache", None)
+    if release is None:
+        raise RuntimeError("native oneDNN INT8 cache release is unavailable")
+    for device_index in range(torch.xpu.device_count()):
+        torch.xpu.synchronize(device_index)
+    _clear_krea2_activation_cache()
+    _clear_bmg_qkv_activation_cache()
+    return int(release())
+
+
 __all__ = [
     "quantize_int8_tensorwise",
     "quantize_int8_rowwise",
@@ -1675,10 +1762,14 @@ __all__ = [
     "int8_linear_prequantized",
     "int8_linear_shared_input",
     "rotate_convrot",
+    "prepare_convrot_hadamard",
+    "clear_convrot_hadamard_cache",
+    "set_allocation_context_factory",
     "quantize_int8_convrot_fused",
     "quantize_int8_convrot_weight",
     "dequantize_int8_convrot_weight",
     "dequantize_int8_convrot_weight_dtype",
     "int8_cache_clear",
+    "release_onednn_int8_cache",
     "int8_cache_stats",
 ]

@@ -109,6 +109,8 @@ def onednn_int4_gemm(
     For production use, prefer onednn_int4_gemm_preconverted() with pre-converted
     weights for better performance.
 
+    Requires positive K and num_groups, with K divisible by num_groups.
+
     Args:
         act: [M, K] bf16/f16/f32 activations
         packed: [N, K/2] uint8 packed signed INT4 weights
@@ -135,6 +137,8 @@ def onednn_int4_gemm_preconverted(
     scales already in f16. Avoids per-call conversion overhead (~0.18ms/call).
 
     Use prepare_onednn_weights() to convert weights once at model load time.
+
+    Requires positive K and num_groups, with K divisible by num_groups.
 
     Args:
         act: [M, K] bf16/f16/f32 activations (f16 is ~3.5x faster than bf16)
@@ -190,6 +194,8 @@ def onednn_int4_gemm_add_to_output(
 
     dst += GEMM(f16_act, u4_wgt) — caller pre-fills dst with the residual
     (e.g. LoRA result + bias). Eliminates separate fused_convert_add kernel.
+
+    Requires positive K and num_groups, with K divisible by num_groups.
 
     Args:
         act: [M, K] f16 activations

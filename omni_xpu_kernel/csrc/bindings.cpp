@@ -16,6 +16,7 @@
 #include "device_utils.h"
 #include "kernel_tuning_overrides.h"
 #include "utils.h"
+#include "kitchen_decode.h"
 
 namespace omni_xpu {
 namespace kitchen {
@@ -173,6 +174,8 @@ namespace fp8 {
     torch::Tensor stochastic_rounding(const torch::Tensor& input, const torch::Tensor& rng, torch::ScalarType out_dtype);
 }
 namespace int8_ops {
+    std::tuple<torch::Tensor, torch::Tensor> gated_quantize_int8(
+        torch::Tensor input, const std::string& input_act, int64_t group_size);
     torch::Tensor mm_int8(torch::Tensor a, torch::Tensor b);
     std::tuple<torch::Tensor, torch::Tensor> rms_norm_convrot_quantize_int8(
         torch::Tensor input, torch::Tensor norm_weight, double eps,
@@ -228,6 +231,9 @@ namespace int8_ops {
     std::tuple<torch::Tensor, torch::Tensor> fused_gelu_tanh_quantize_rowwise(
         torch::Tensor input);
     torch::Tensor rotate_convrot(torch::Tensor input, int64_t group_size);
+    void prepare_convrot_hadamard(torch::Tensor exemplar, int64_t group_size,
+                                  bool fp32);
+    int64_t clear_convrot_hadamard_cache(int64_t device_index);
     std::tuple<torch::Tensor, torch::Tensor> quantize_int8_convrot_weight(
         torch::Tensor weight, int64_t group_size, int64_t stochastic_rounding);
     torch::Tensor dequantize_int8_convrot_weight(
@@ -242,6 +248,9 @@ namespace int8_ops {
     torch::Tensor dequantize_int8_simple_dtype(torch::Tensor q, torch::Tensor scale, int64_t output_dtype_code);
     void int8_cache_clear();
     std::tuple<int64_t, int64_t, int64_t> int8_cache_stats();
+#if defined(__linux__)
+    int64_t release_onednn_int8_cache();
+#endif
 }
 }
 
@@ -974,6 +983,13 @@ PYBIND11_MODULE(_C, m) {
     int8.def("rotate_convrot", &omni_xpu::int8_ops::rotate_convrot,
         "Regular Hadamard rotation using a cached matrix multiplication on the last dimension",
         py::arg("input"), py::arg("group_size") = 256);
+    int8.def("prepare_convrot_hadamard", &omni_xpu::int8_ops::prepare_convrot_hadamard,
+        "Prepare the persistent ConvRot Hadamard matrix under the caller's allocation context",
+        py::arg("exemplar"), py::arg("group_size") = 256,
+        py::arg("fp32") = false);
+    int8.def("clear_convrot_hadamard_cache", &omni_xpu::int8_ops::clear_convrot_hadamard_cache,
+        "Release cached ConvRot matrices for one XPU device after graph teardown",
+        py::arg("device_index"));
     int8.def(
         "quantize_int8_convrot_fused_dg2",
         &omni_xpu::int8_ops::quantize_int8_convrot_fused_dg2,
@@ -1019,9 +1035,21 @@ PYBIND11_MODULE(_C, m) {
         "Clear INT8 oneDNN primitive cache");
     int8.def("int8_cache_stats", &omni_xpu::int8_ops::int8_cache_stats,
         "Return INT8 cache stats as (hits, misses, size)");
+#if defined(__linux__)
+    int8.def("release_onednn_int8_cache", &omni_xpu::int8_ops::release_onednn_int8_cache,
+        "Release INT8 states and flush the linked oneDNN primitive cache after XPU work stops");
+#endif
 
     auto kitchen = m.def_submodule(
         "kitchen", "Native Comfy Kitchen XPU operators");
+    kitchen.def("decode_attention", &omni_xpu::kitchen::decode_attention,
+        py::arg("q"), py::arg("k"), py::arg("v"), py::arg("lengths"), py::arg("causal")=true);
+    kitchen.def("decode_step_merge", &omni_xpu::kitchen::decode_step_merge,
+        py::arg("out"), py::arg("lse"), py::arg("q"), py::arg("k"), py::arg("v"), py::arg("merged"));
+    kitchen.def("int8_decode_update", &omni_xpu::kitchen::int8_decode_update);
+    kitchen.def("int8_decode", &omni_xpu::kitchen::int8_decode);
+    kitchen.def("deltanet_conv_deferred", &omni_xpu::kitchen::deltanet_conv_deferred);
+    kitchen.def("gated_delta_decode_deferred", &omni_xpu::kitchen::gated_delta_decode_deferred);
     kitchen.def(
         "deltanet_conv_step",
         &omni_xpu::kitchen::deltanet_conv_step,
@@ -1085,6 +1113,10 @@ PYBIND11_MODULE(_C, m) {
         "rms_norm_for_int8", &omni_xpu::kitchen::rms_norm_for_int8,
         "XPU RMSNorm materialization for Kitchen INT8 projection",
         py::arg("input"), py::arg("weight"), py::arg("eps") = 1e-6);
+    kitchen.def(
+        "gated_quantize_int8", &omni_xpu::int8_ops::gated_quantize_int8,
+        "XPU SiTU/SwiGLU, optional ConvRot and rowwise INT8 quantization",
+        py::arg("input"), py::arg("input_act"), py::arg("group_size") = 0);
     kitchen.def(
         "rms_norm_quantize_int8", &omni_xpu::kitchen::rms_norm_quantize_int8,
         "XPU RMSNorm and rowwise INT8 quantization in one launch",

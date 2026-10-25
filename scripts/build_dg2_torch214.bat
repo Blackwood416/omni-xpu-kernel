@@ -23,6 +23,7 @@ set "DNNLROOT=C:\Program Files (x86)\Intel\oneAPI\dnnl\latest"
 set "OMNI_XPU_DEVICE=a770"
 set "OMNI_XPU_REQUIRE_CUTE=0"
 set "OMNI_XPU_BUILD_JOBS=24"
+set "OMNI_XPU_BUILD_NUMBER=2"
 set "PATH=C:\Users\Administrator\AppData\Local\Temp\omni-build-torch214\Lib\site-packages\torch\lib;%PATH%"
 
 cd /d "%~dp0.."
