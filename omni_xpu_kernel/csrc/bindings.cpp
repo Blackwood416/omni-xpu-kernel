@@ -187,6 +187,11 @@ namespace int8_ops {
         torch::Tensor x_int8, torch::Tensor x_scale, torch::Tensor weight,
         torch::Tensor weight_scale, std::optional<torch::Tensor> bias,
         int64_t out_dtype_code);
+    torch::Tensor w4a8_linear_prequantized(
+        torch::Tensor input, torch::Tensor x_scale, torch::Tensor packed,
+        torch::Tensor relative_scale, torch::Tensor channel_scale,
+        std::optional<torch::Tensor> codebook, std::optional<torch::Tensor> bias,
+        int64_t group_size, int64_t out_dtype_code);
     torch::Tensor int8_linear_prequantized_out(
         torch::Tensor x_int8, torch::Tensor x_scale, torch::Tensor weight,
         torch::Tensor weight_scale, std::optional<torch::Tensor> bias,
@@ -891,6 +896,13 @@ PYBIND11_MODULE(_C, m) {
         py::arg("x_int8"), py::arg("x_scale"), py::arg("weight"),
         py::arg("weight_scale"), py::arg("bias") = py::none(),
         py::arg("out_dtype_code") = 2);
+    int8.def("w4a8_linear_prequantized", &omni_xpu::int8_ops::w4a8_linear_prequantized,
+        "Grouped packed W4A8 linear without a materialized INT8 weight.\n"
+        "Decode each weight onto the INT8 grid before integer dot products.",
+        py::arg("input"), py::arg("x_scale"), py::arg("packed"),
+        py::arg("relative_scale"), py::arg("channel_scale"),
+        py::arg("codebook") = py::none(), py::arg("bias") = py::none(),
+        py::arg("group_size") = 16, py::arg("out_dtype_code") = 2);
     int8.def(
         "int8_linear_prequantized_out",
         &omni_xpu::int8_ops::int8_linear_prequantized_out,

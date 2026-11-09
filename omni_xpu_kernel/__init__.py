@@ -71,6 +71,37 @@ def _configure_windows_dll_search_paths() -> None:
         if raw_path:
             _add_windows_dll_directory(Path(raw_path))
 
+    # Register oneAPI directories (compiler, dnnl, tbb, ocloc) before preloading
+    # bundled runtimes so secondary dependencies (sycl9, tbb12, svml) resolve cleanly.
+    preferred_version = os.environ.get("OMNI_XPU_ONEAPI_VERSION")
+    program_roots = (
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
+    )
+    for program_root in program_roots:
+        oneapi_root = program_root / "Intel" / "oneAPI"
+        version_names = [preferred_version] if preferred_version else ["latest", "2026.2"]
+        for version in version_names:
+            if not version:
+                continue
+            for relative in (
+                ("compiler", version, "bin"),
+                ("compiler", version, "bin", "compiler"),
+                ("compiler", version, "bin", "1033"),
+                ("dnnl", version, "bin"),
+                ("tbb", version, "bin"),
+                ("tbb", "latest", "bin"),
+                ("ocloc", version, "bin"),
+            ):
+                _add_windows_dll_directory(oneapi_root.joinpath(*relative))
+
+    # Preload essential base runtimes to ensure transitive DLL dependencies resolve
+    for base_dll in ("sycl9.dll", "libmmd.dll", "svml_dispmd.dll", "tbb12.dll"):
+        try:
+            _preloaded_dlls.append(ctypes.CDLL(base_dll))
+        except Exception:
+            pass
+
     package_libs = Path(__file__).resolve().parent / ".libs"
     _add_windows_dll_directory(package_libs)
     bundled_dnnl = package_libs / "dnnl.dll"
@@ -83,30 +114,6 @@ def _configure_windows_dll_search_paths() -> None:
             raise ImportError(
                 f"Failed to load bundled oneDNN runtime {bundled_dnnl}: {error}"
             ) from error
-        return
-
-    # Source checkouts and legacy wheels may not carry a private runtime. Keep
-    # the existing oneAPI lookup as a compatibility fallback only.
-    preferred_version = os.environ.get("OMNI_XPU_ONEAPI_VERSION")
-    program_roots = (
-        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
-    )
-    for program_root in program_roots:
-        oneapi_root = program_root / "Intel" / "oneAPI"
-        version_names = [preferred_version] if preferred_version else []
-        version_names.append("latest")
-        for version in version_names:
-            if not version:
-                continue
-            for relative in (
-                ("compiler", version, "bin"),
-                ("compiler", version, "bin", "compiler"),
-                ("compiler", version, "bin", "1033"),
-                ("dnnl", version, "bin"),
-                ("ocloc", version, "bin"),
-            ):
-                _add_windows_dll_directory(oneapi_root.joinpath(*relative))
 
 def _load_extension():
     """Load the native C++ extension module."""
